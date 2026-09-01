@@ -34,3 +34,4 @@ Explain the tradeoff. Averaging over a finite interval acts as a low-pass filter
 ## Part 4: LED Brightness From Averaged Analog Input
 Record the PWM high and low voltages, period, frequency, and duty cycle at two substantially different potentiometer settings. Determine which quantities change and which remain approximately fixed. If you use Arduino Uno pin 9, compare the measured frequency with the expected value of approximately 490 Hz. Compare this with the roughly 50-60 Hz range above which ordinary flicker often appears steady to the eye. Explain why the LED looks continuously lit even though the oscilloscope resolves individual pulses.
 
+test

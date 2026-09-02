@@ -1,94 +1,45 @@
 # Module 1 Assignment: First Contact With The Instrument CODE
 ## Part 1: Blink And Digital Output
-void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
-}
-void loop(){
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(100);
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(100);
-}
+
 
 
 ## Part 2: AnalogReadSerial
 
-void setup() {
-  Serial.begin(9600);
-}
-void loop() {
-  int sensorValue = analogRead(A0);
-  Serial.println(sensorValue);
-    delay(1);
-}
 
 
 ## Part 3: Quantify The Power Of Averaging
 ### 3A: Observe The Integer ADC Readings
-Same code as Part 2
+Do the reported values vary even when you do not touch the potentiometer?
+Yes for some voltage, no for some others.
+Do the values change continuously, or do they occupy discrete integer levels? Why?
+The value changes on discrete integer level. Because the values range from 0V to 5V in 1024 steps.
+What does Serial Monitor reveal that is difficult to see in Serial Plotter, and vice versa?
+It is difficult to see the trend in serial monitor because the data flies too quickly, but it is easy to visualize in serial plotter. Serial plotter is not as good at looking at exact numerical value compared to serial monitor.
 
 ### 3B: Convert ADC Number To Voltage
-void setup() {
-  Serial.begin(9600);
-}
-void loop() {
-  double voltAve = 0.;
-  int numAve = 1;
-    for (int i = 0; i < numAve; i++){
-    int sensorValue = analogRead(A0);
-    voltAve += sensorValue;
-  }
-
-
-  voltAve = voltAve/numAve;
-  voltAve = voltAve * (5000 / 1023.); // convert to millivolts
-
-
-  Serial.println(voltAve);
-  delay(1);
-}
-
+#### Calculate this resolution in millivolts. For a 5.00 V reference it is about 4.88 mV. Explain why printing many decimal places does not, by itself, give the ADC finer physical resolution.
+The resolution is not finer because the range from 0V to 5V is divided into 1024 points. Having more decimal places that are not significant figures does not help physical resolution, it is just a math artifact.
 
 ### 3C: Compare One Reading With A 1000-Reading Average
-Same code as Part 3B
+#### Print only one plotted voltage quantity per line. In Serial Monitor, also identify the point number and whether it came from.
+Stop the plotter when the transition between an unaveraged block and a 1000-reading average block is approximately halfway across the graph, as in the figure below. Your numerical values and detailed trace need not look identical to the example. Save this screenshot and the corresponding numerical output.
+
+(a) For each 100-point block, calculate the mean voltage and sample standard deviation. In this exercise, use as an empirical estimate of the noise-limited voltage resolution of the reported value. Compare the measured ratio with the independent-noise prediction
+Mean of 1000 point averaging: 2461.25 
+Std Dev of 1000 point averaging: 0.078
+The 1000 point average is about 30 times better than the no averaging data.
+
+(b) A second way to measure the effective resolution in millivolts for the unaveraged and averaged blocks is by looking at the smallest discrete voltage jump between two subsequent data points. Compare the unaveraged smallest discrete voltage jump between two subsequent data points with the ADC's fixed one-count digitization step.
+Smallest discrete data jump: 0.02mV
+Explain likely departures from the 1/sqrt(N) prediction, including drift, correlated pickup, quantization, and variation of the Arduino reference voltage. Averaging improves precision under these conditions, but it does not automatically improve absolute accuracy or remove calibration errors.
 
 ### 3D: Measure The Time Cost Of Averaging
-unsigned long t1;
-unsigned long t2;
-
-
-void setup() {
-  Serial.begin(9600);
-}
-void loop() {
-  double voltAve = 0.;
-  int numAve = 1;
-  t1=micros();
-  for (int i = 0; i < numAve; i++){
-    int sensorValue = analogRead(A0);
-    voltAve += sensorValue;
-  }
-  t2=micros();
-  Serial.println('t='+(t2-t1));
-  delay(1);
-}
-
+#### Explain the tradeoff. Averaging over a finite interval acts as a low-pass filter: rapid fluctuations tend to cancel, but changes occurring during the averaging window are smoothed or delayed. Improved voltage precision therefore comes with reduced time resolution.
+The graphs above shows the time in microseconds in the y-axis and it represents the amount of time it takes for the code to run through the for loop once. We can see that for the no averaging, on average, it takes about 29,869 microseconds for the code to run through one for loop, however, with 1000-point averaging, it takes, on average, about  141,763 microseconds for the code to run through one for loop. This is a significant difference in time and the 1000-point averaging takes 4.7 times longer than the no averaging code to obtain one data point. 
 
 ## Part 4: LED Brightness From Averaged Analog Input
-const int ledPin = 9;
-void setup() {
-  Serial.begin(9600);
-  pinMode(ledPin, OUTPUT);
-}
+#### Determine which quantities change and which remain approximately fixed. If you use Arduino Uno pin 9, compare the measured frequency with the expected value of approximately 490 Hz. Compare this with the roughly 50-60 Hz range above which ordinary flicker often appears steady to the eye. 
+Quantities like the maximum voltage and minimum voltage stays the same but the duty cycle, frequency, and period changes depending on where the potentiometer’s shaft is. The measured frequency is 500 Hz, which was obtained by the fact that we had 1 period per 2ms. The inverse of  2ms = 500 Hz. Compared to the expected value of 490 Hz, 500 Hz is very close as there is only a ~2% error. Compared to the 50~60 Hz range for ordinary flicker, the frequency 10 times of that. 
 
-
-void loop() {
-  double voltAve = 0.;
-  int numAve = 1;
-    for (int i = 0; i < numAve; i++){
-    int sensorValue = analogRead(A0);
-    voltAve += sensorValue;
-  }
-    voltAve = voltAve/numAve;
-  analogWrite(ledPin, voltAve/4);  
-}
+#### Explain why the LED looks continuously lit even though the oscilloscope resolves individual pulses.
+The LED looks continuously lit even though the oscilloscope resolves individual pulses because it is pulsing at such a fast time scale that our eyes can’t process the flickering individually like in the first part of the lab, and so instead, we see a dimming LED. 

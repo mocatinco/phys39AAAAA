@@ -3,6 +3,7 @@
 
 
 
+
 ## Part 2: AnalogReadSerial
 
 
@@ -35,6 +36,12 @@ Explain likely departures from the 1/sqrt(N) prediction, including drift, correl
 
 ### 3D: Measure The Time Cost Of Averaging
 #### Explain the tradeoff. Averaging over a finite interval acts as a low-pass filter: rapid fluctuations tend to cancel, but changes occurring during the averaging window are smoothed or delayed. Improved voltage precision therefore comes with reduced time resolution.
+1000-Reading Average Time Interval:
+ ![alt text](<Screenshot 2026-09-02 100328-1.png>)
+
+No Averaging Time Interval:
+![alt text](<Screenshot 2026-09-02 100437-1.png>)
+
 The graphs above shows the time in microseconds in the y-axis and it represents the amount of time it takes for the code to run through the for loop once. We can see that for the no averaging, on average, it takes about 29,869 microseconds for the code to run through one for loop, however, with 1000-point averaging, it takes, on average, about  141,763 microseconds for the code to run through one for loop. This is a significant difference in time and the 1000-point averaging takes 4.7 times longer than the no averaging code to obtain one data point. 
 
 ## Part 4: LED Brightness From Averaged Analog Input

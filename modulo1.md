@@ -9,6 +9,7 @@
 
 ## Part 3: Quantify The Power Of Averaging
 ### 3A: Observe The Integer ADC Readings
+![alt text](<Screenshot 2026-09-08 163319.png>)
 Do the reported values vary even when you do not touch the potentiometer?
 Yes for some voltage, no for some others.
 Do the values change continuously, or do they occupy discrete integer levels? Why?
@@ -45,6 +46,11 @@ No Averaging Time Interval:
 The graphs above shows the time in microseconds in the y-axis and it represents the amount of time it takes for the code to run through the for loop once. We can see that for the no averaging, on average, it takes about 29,869 microseconds for the code to run through one for loop, however, with 1000-point averaging, it takes, on average, about  141,763 microseconds for the code to run through one for loop. This is a significant difference in time and the 1000-point averaging takes 4.7 times longer than the no averaging code to obtain one data point. 
 
 ## Part 4: LED Brightness From Averaged Analog Input
+#### Record the PWM high and low voltages, period, frequency, and duty cycle at two substantially different potentiometer settings.  
+![This is what the oscilloscope shows the PWM when the potentiometer is set to zero and the LED is at its highest brightness.](<Screenshot 2026-09-08 162857.png>)
+![The oscilloscope when the potentiometer is set to its maximum resistance and the LED is off.](<Screenshot 2026-09-08 163045.png>)
+![The oscilloscope when the potentiometer’s shaft is rotated to the middle and the LED is dimmed.](<Screenshot 2026-09-08 163145.png>)
+
 #### Determine which quantities change and which remain approximately fixed. If you use Arduino Uno pin 9, compare the measured frequency with the expected value of approximately 490 Hz. Compare this with the roughly 50-60 Hz range above which ordinary flicker often appears steady to the eye. 
 Quantities like the maximum voltage and minimum voltage stays the same but the duty cycle, frequency, and period changes depending on where the potentiometer’s shaft is. The measured frequency is 500 Hz, which was obtained by the fact that we had 1 period per 2ms. The inverse of  2ms = 500 Hz. Compared to the expected value of 490 Hz, 500 Hz is very close as there is only a ~2% error. Compared to the 50~60 Hz range for ordinary flicker, the frequency 10 times of that. 
 

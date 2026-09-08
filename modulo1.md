@@ -49,9 +49,19 @@ Stop the plotter when the transition between an unaveraged block and a 1000-read
 ![alt text](Error_noaverging_1000pointaveraging.png)
 
 (a) For each 100-point block, calculate the mean voltage and sample standard deviation. In this exercise, use as an empirical estimate of the noise-limited voltage resolution of the reported value. Compare the measured ratio with the independent-noise prediction
-Mean of 1000 point averaging: 2461.25 
-Std Dev of 1000 point averaging: 0.078
-The 1000 point average is about 30 times better than the no averaging data.
+![alt text](image-4.png)
+* 100 Data for no averaging:
+2458.46 2458.46 2463.34 2458.46 2458.46 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2463.34 2463.34 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2458.46 2463.34 2458.46 2458.46 2458.46 2458.46 2463.34 2463.34 2458.46 2458.46 2458.46 2458.46 2458.46
+* Mean of no averaging: 2459.29
+* Std Dev of no averaging: 1.84
+![alt text](image-5.png)
+
+* 100 Data for 1000-point averaging block:
+2461.32 2461.27 2461.31 2461.31 2461.36 2461.28 2461.27 2461.31 2461.35 2461.31 2461.35 2461.27 2461.3 2461.31 2461.27 2461.3 2461.35 2461.37 2461.47 2461.31 2461.35 2461.34 2461.43 2461.37 2461.31 2461.35 2461.19 2461.28 2461.26 2461.2 2461.22 2461.25 2461.18 2461.21 2461.15 2461.3 2461.11 2461.24 2461.16 2461.23 2461.22 2461.31 2461.22 2461.17 2461.25 2461.14 2461.23 2461.2 2461.18 2461.22 2461.08 2461.25 2461.23 2461.26 2461.36 2461.24 2461.14 2461.34 2461.21 2461.2 2461.19 2461.22 2461.41 2461.32 2461.32 2461.24 2461.36 2461.24 2461.16 2461.26 2461.18 2461.31 2461.14 2461.22 2461.23 2461.05 2461.26 2461.2 2461.25 2461.24 2461.33 2461.14 2461.27 2461.19 2461.13 2461.31 2461.33 2461.15 2461.31 2461.21 2461.22 2461.35 2461.27 2461.12 2461.3 2461.16 2461.17 2461.23 2461.14 2461.26
+* Mean of 1000 point averaging: 2461.25 
+*Std Dev of 1000 point averaging: 0.078
+The 1000 point average is about 25 times better than the no averaging data.
+
 
 (b) A second way to measure the effective resolution in millivolts for the unaveraged and averaged blocks is by looking at the smallest discrete voltage jump between two subsequent data points. Compare the unaveraged smallest discrete voltage jump between two subsequent data points with the ADC's fixed one-count digitization step.
 Smallest discrete data jump: 0.02mV

@@ -1,9 +1,31 @@
 # Module 1 Assignment: First Contact With The Instrument CODE
 ## Part 1: Blink And Digital Output
-
-
+![alt text](image.png)
+1:1
+* **High Voltage:** 2.5V
+* **Low Voltage:** 0V
+* **Period:** 1000ms
+* **Frequency:** 1Hz
+* **Duty Cycle:** 50%
+![alt text](image-1.png)
+1:10
+* **High Voltage:** 2.5V
+* **Low Voltage:** 0V
+* **Period:** 1100ms
+* **Frequency:** 0.91Hz
+* **Duty Cycle:** 9.09%
+![alt text](image-2.png)
+10:1
+* **High Voltage:** 2.5V
+* **Low Voltage:** 0V
+* **Period:** 1100ms
+* **Frequency:** 0.91Hz
+* **Duty Cycle:** 90.1%
 
 ## Part 2: AnalogReadSerial
+Rotate the potentiometer and confirm that the reported ADC number responds. Part 3 develops this observation into a quantitative measurement of ADC digitization and averaging.
+Use Analog, ADC, And PWM when you need the ideas behind the measurement.
+![alt text](image-3.png)
 
 
 

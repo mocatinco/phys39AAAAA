@@ -23,6 +23,9 @@
 * **Duty Cycle:** 90.1%
 
 ## Part 2: AnalogReadSerial
+Rotate the potentiometer and confirm that the reported ADC number responds. Part 3 develops this observation into a quantitative measurement of ADC digitization and averaging.
+Use Analog, ADC, And PWM when you need the ideas behind the measurement.
+![alt text](image-3.png)
 
 
 

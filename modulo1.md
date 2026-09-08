@@ -24,6 +24,7 @@ The resolution is not finer because the range from 0V to 5V is divided into 1024
 ### 3C: Compare One Reading With A 1000-Reading Average
 #### Print only one plotted voltage quantity per line. In Serial Monitor, also identify the point number and whether it came from.
 Stop the plotter when the transition between an unaveraged block and a 1000-reading average block is approximately halfway across the graph, as in the figure below. Your numerical values and detailed trace need not look identical to the example. Save this screenshot and the corresponding numerical output.
+![alt text](Error_noaverging_1000pointaveraging.png)
 
 (a) For each 100-point block, calculate the mean voltage and sample standard deviation. In this exercise, use as an empirical estimate of the noise-limited voltage resolution of the reported value. Compare the measured ratio with the independent-noise prediction
 Mean of 1000 point averaging: 2461.25 
@@ -37,10 +38,10 @@ Explain likely departures from the 1/sqrt(N) prediction, including drift, correl
 ### 3D: Measure The Time Cost Of Averaging
 #### Explain the tradeoff. Averaging over a finite interval acts as a low-pass filter: rapid fluctuations tend to cancel, but changes occurring during the averaging window are smoothed or delayed. Improved voltage precision therefore comes with reduced time resolution.
 1000-Reading Average Time Interval:
- ![alt text](<Screenshot 2026-09-02 100328-1.png>)
+![alt text](Timeintervalfor1000averaging.png)
 
 No Averaging Time Interval:
-![alt text](<Screenshot 2026-09-02 100437-1.png>)
+![alt text](Timeinterval_noaveraging.png)
 
 The graphs above shows the time in microseconds in the y-axis and it represents the amount of time it takes for the code to run through the for loop once. We can see that for the no averaging, on average, it takes about 29,869 microseconds for the code to run through one for loop, however, with 1000-point averaging, it takes, on average, about  141,763 microseconds for the code to run through one for loop. This is a significant difference in time and the 1000-point averaging takes 4.7 times longer than the no averaging code to obtain one data point. 
 

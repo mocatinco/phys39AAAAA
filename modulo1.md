@@ -23,8 +23,8 @@
 * **Duty Cycle:** 90.1%
 
 ## Part 2: AnalogReadSerial
-Rotate the potentiometer and confirm that the reported ADC number responds. Part 3 develops this observation into a quantitative measurement of ADC digitization and averaging.
-Use Analog, ADC, And PWM when you need the ideas behind the measurement.
+#### Rotate the potentiometer and confirm that the reported ADC number responds. Part 3 develops this observation into a quantitative measurement of ADC digitization and averaging.
+#### Use Analog, ADC, And PWM when you need the ideas behind the measurement.
 ![alt text](image-3.png)
 
 
@@ -32,11 +32,14 @@ Use Analog, ADC, And PWM when you need the ideas behind the measurement.
 ## Part 3: Quantify The Power Of Averaging
 ### 3A: Observe The Integer ADC Readings
 ![alt text](<Screenshot 2026-09-08 163319.png>)
-Do the reported values vary even when you do not touch the potentiometer?
+
+#### Do the reported values vary even when you do not touch the potentiometer?
 Yes for some voltage, no for some others.
-Do the values change continuously, or do they occupy discrete integer levels? Why?
+
+#### Do the values change continuously, or do they occupy discrete integer levels? Why?
 The value changes on discrete integer level. Because the values range from 0V to 5V in 1024 steps.
-What does Serial Monitor reveal that is difficult to see in Serial Plotter, and vice versa?
+
+#### What does Serial Monitor reveal that is difficult to see in Serial Plotter, and vice versa?
 It is difficult to see the trend in serial monitor because the data flies too quickly, but it is easy to visualize in serial plotter. Serial plotter is not as good at looking at exact numerical value compared to serial monitor.
 
 ### 3B: Convert ADC Number To Voltage
@@ -45,15 +48,15 @@ The resolution is not finer because the range from 0V to 5V is divided into 1024
 
 ### 3C: Compare One Reading With A 1000-Reading Average
 #### Print only one plotted voltage quantity per line. In Serial Monitor, also identify the point number and whether it came from.
-Stop the plotter when the transition between an unaveraged block and a 1000-reading average block is approximately halfway across the graph, as in the figure below. Your numerical values and detailed trace need not look identical to the example. Save this screenshot and the corresponding numerical output.
+#### Stop the plotter when the transition between an unaveraged block and a 1000-reading average block is approximately halfway across the graph, as in the figure below. Your numerical values and detailed trace need not look identical to the example. Save this screenshot and the corresponding numerical output.
 ![alt text](Error_noaverging_1000pointaveraging.png)
 
-(a) For each 100-point block, calculate the mean voltage and sample standard deviation. In this exercise, use as an empirical estimate of the noise-limited voltage resolution of the reported value. Compare the measured ratio with the independent-noise prediction
+#### (a) For each 100-point block, calculate the mean voltage and sample standard deviation. In this exercise, use as an empirical estimate of the noise-limited voltage resolution of the reported value. Compare the measured ratio with the independent-noise prediction
 Mean of 1000 point averaging: 2461.25 
 Std Dev of 1000 point averaging: 0.078
 The 1000 point average is about 30 times better than the no averaging data.
 
-(b) A second way to measure the effective resolution in millivolts for the unaveraged and averaged blocks is by looking at the smallest discrete voltage jump between two subsequent data points. Compare the unaveraged smallest discrete voltage jump between two subsequent data points with the ADC's fixed one-count digitization step.
+#### (b) A second way to measure the effective resolution in millivolts for the unaveraged and averaged blocks is by looking at the smallest discrete voltage jump between two subsequent data points. Compare the unaveraged smallest discrete voltage jump between two subsequent data points with the ADC's fixed one-count digitization step.
 Smallest discrete data jump: 0.02mV
 Explain likely departures from the 1/sqrt(N) prediction, including drift, correlated pickup, quantization, and variation of the Arduino reference voltage. Averaging improves precision under these conditions, but it does not automatically improve absolute accuracy or remove calibration errors.
 

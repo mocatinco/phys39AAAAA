@@ -1,6 +1,6 @@
 # Module 1 Assignment: First Contact With The Instrument CODE
 ## Part 1: Blink And Digital Output
-![alt text](image.png)
+
 
 
 ## Part 2: AnalogReadSerial

@@ -58,6 +58,7 @@ The resolution is not finer because the range from 0V to 5V is divided into 1024
 * Mean of no averaging: 2459.29
 * Std Dev of no averaging: 1.84
 <br>
+
 ![alt text](image-5.png)
 
 * 100 Data for 1000-point averaging block:

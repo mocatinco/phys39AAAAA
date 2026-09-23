@@ -96,13 +96,13 @@ def parse_arduino_line(line):
     # Convert milliseconds to seconds.
     time_s = time_ms / 1000.0
 
-    # Arduino pin 9 = Heat
-    # Arduino pin 10 = Cool
+    # Arduino pin 9 = Cool
+    # Arduino pin 10 = Heat
     if active_pin == 9:
-        heat_cool = 1
+        heat_cool = 0
 
     elif active_pin == 10:
-        heat_cool = 0
+        heat_cool = 1
 
     else:
         return None

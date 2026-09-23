@@ -212,3 +212,4 @@ if __name__ == "__main__":
     window = TemperatureMonitorWindow()
     window.show()
     sys.exit(app.exec())
+

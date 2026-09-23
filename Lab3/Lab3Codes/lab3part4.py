@@ -98,10 +98,10 @@ def parse_arduino_line(line):
 
     # Arduino pin 9 = Cool
     # Arduino pin 10 = Heat
-    if active_pin == 9:
+    if active_pin == 10:
         heat_cool = 0
 
-    elif active_pin == 10:
+    elif active_pin == 9:
         heat_cool = 1
 
     else:

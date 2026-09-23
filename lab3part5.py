@@ -127,10 +127,10 @@ def parse_arduino_line(line):
     # Pin 9 means HEAT.
     # Pin 10 means COOL.
     if active_pin == 9:
-        heat_cool = 1
+        heat_cool = 0
 
     elif active_pin == 10:
-        heat_cool = 0
+        heat_cool = 1
 
     else:
         return None

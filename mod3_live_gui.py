@@ -1,11 +1,11 @@
-"""Display-only Arduino temperature monitor.
+"""Live viewer for the Arduino Part 3 measurement stream.
 
 This script reads the measurement lines produced by the Arduino sketch in
-Lab3/Lab3Codes/lab3part3.ino, ignores malformed lines, and plots only
-temperature versus Arduino time.
+Lab3/Lab3Codes/lab3part3.ino, ignores malformed data, plots temperature vs.
+Arduino time, and saves accepted values to CSV.
 
-The parser is intentionally strict: it accepts only the serial format printed by
-that sketch and ignores anything else.
+Important: it only reads the serial port. It does not send any commands back to
+Arduino.
 """
 
 import csv
@@ -30,7 +30,6 @@ TEMP_MAX_C = 60.0
 CSV_FILENAME = "arduino_measurements.csv"
 # ---------------------------------------------------------------------------
 
-# This must match the Arduino sketch exactly.
 MEASUREMENT_PATTERN = re.compile(
     r"^Temperature \(C\):\s*(?P<temperature>[+-]?\d+(?:\.\d+)?)\s*,\s*"
     r"Time \(ms\):\s*(?P<time_ms>[+-]?\d+(?:\.\d+)?)\s*,\s*"
@@ -43,10 +42,12 @@ MEASUREMENT_PATTERN = re.compile(
 # Serial parsing
 # ---------------------------------------------------------------------------
 def parse_measurement_line(raw_line):
-    """Return a cleaned dictionary for a valid Arduino measurement line.
+    """Return a cleaned dictionary when the line matches the Arduino format.
 
-    Example valid line from the sketch:
-    Temperature (C): 27.73, Time (ms): 645.06, PWM: 120, Active PWM pin: 9
+    The Arduino sketch sends lines like:
+        Temperature (C): 27.73, Time (ms): 645.06, PWM: 120, Active PWM pin: 9
+
+    We ignore everything else to keep the parser strict and safe.
     """
     text = raw_line.decode("utf-8", errors="replace").strip()
     if not text:
@@ -64,8 +65,8 @@ def parse_measurement_line(raw_line):
     except ValueError:
         return None
 
-    # The Arduino code uses pin 9 for one direction and pin 10 for the opposite.
-    # We translate that into 1 for heat and 0 for cool for the printout.
+    # The sketch uses pin 9 for one direction and pin 10 for the opposite.
+    # We encode that as a simple 1/0 signal for the CSV and terminal output.
     heat_cool = 1 if pin_number == 9 else 0
 
     return {
@@ -80,7 +81,7 @@ def parse_measurement_line(raw_line):
 # CSV saving
 # ---------------------------------------------------------------------------
 def append_csv_row(row):
-    """Append accepted values to a CSV file with the requested columns."""
+    """Append accepted data to CSV with the requested column names."""
     file_exists = os.path.exists(CSV_FILENAME)
 
     with open(CSV_FILENAME, "a", newline="") as csv_file:
@@ -91,7 +92,6 @@ def append_csv_row(row):
 
         if not file_exists:
             writer.writeheader()
-            print(f"CSV file created: {CSV_FILENAME}")
 
         writer.writerow(
             {
@@ -121,7 +121,7 @@ class TemperatureMonitorWindow(QMainWindow):
 
         layout = QVBoxLayout(central_widget)
 
-        # Small status line near the top of the window.
+        # Simple status text near the top of the window.
         self.status_label = QLabel("Waiting for serial data...")
         self.status_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.status_label)
@@ -160,7 +160,7 @@ class TemperatureMonitorWindow(QMainWindow):
             )
 
     def poll_serial(self):
-        """Read lines and accept only valid measurement records."""
+        """Read any available lines and process them if they are valid."""
         if self.serial_port is None or not self.serial_port.is_open():
             return
 
@@ -171,7 +171,7 @@ class TemperatureMonitorWindow(QMainWindow):
 
             parsed = parse_measurement_line(raw_line)
             if parsed is None:
-                # Malformed lines are ignored intentionally.
+                # Malformed lines are ignored on purpose.
                 continue
 
             temp_c = parsed["temperature_C"]
@@ -179,7 +179,7 @@ class TemperatureMonitorWindow(QMainWindow):
             pwm = parsed["pwm"]
             heat_cool = parsed["heat_cool"]
 
-            # Print only the extracted values requested by the assignment.
+            # Keep only the accepted values in the console.
             print(
                 f"Temperature (C): {temp_c:.2f}, "
                 f"Time (s): {time_s:.2f}, "
@@ -188,16 +188,17 @@ class TemperatureMonitorWindow(QMainWindow):
             )
 
             append_csv_row(parsed)
-            self.status_label.setText(
-                f"Accepted reading: T={temp_c:.2f} C, time={time_s:.2f} s, PWM={pwm}, heat/cool={heat_cool}"
-            )
             self.add_plot_point(time_s, temp_c)
 
     def add_plot_point(self, time_s, temperature_c):
-        """Store the newest point and keep a rolling time window."""
+        """Store the newest point and keep only a rolling time window."""
         self.times.append(time_s)
         self.temperatures.append(temperature_c)
 
+        if not self.times:
+            return
+
+        # Remove points older than the current rolling window.
         cutoff_time = self.times[-1] - WINDOW_DURATION_S
         while self.times and self.times[0] < cutoff_time:
             self.times.pop(0)

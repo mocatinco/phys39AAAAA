@@ -133,7 +133,7 @@ class TemperatureMonitorWindow(QMainWindow):
         self.plot_widget.setYRange(TEMP_MIN_C, TEMP_MAX_C)
         self.plot_widget.showGrid(x=True, y=True)
         self.plot_curve = self.plot_widget.plot([], [], pen=pg.mkPen("#00aaff", width=2))
-        layout.addWidget(self.plot_widget)
+        #layout.addWidget(self.plot_widget)
 
         # Open serial port without sending commands.
         self.open_serial_port()
@@ -161,8 +161,8 @@ class TemperatureMonitorWindow(QMainWindow):
 
     def poll_serial(self):
         """Read any available lines and process them if they are valid."""
-        if self.serial_port is None or not self.serial_port.is_open():
-            return
+       # if self.serial_port is None or not self.serial_port.is_open():
+       #     return
 
         while True:
             raw_line = self.serial_port.readline()

@@ -162,7 +162,7 @@ except serial.SerialException as error:
     print("  4. No other program is using COM3.")
 
     csv_file.close()
-    sys.exit(1)
+    #sys.exit(1)
 
 
 # ============================================================

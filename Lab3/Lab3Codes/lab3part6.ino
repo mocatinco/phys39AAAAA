@@ -32,8 +32,8 @@
 
 const int THERM_PIN = A0;
 
-const int HEAT_PIN = 10;
-const int COOL_PIN = 9;
+const int HEAT_PIN = 9;
+const int COOL_PIN = 10;
 
 
 // ============================================================
@@ -472,5 +472,5 @@ double resistanceToCelsius(double resistance)
   double celsius =
     kelvin - 273.15;
 
-  return celsius;
+  return celsius; 
 }

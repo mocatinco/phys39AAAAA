@@ -1,4 +1,3 @@
-
 """
 Arduino Temperature + PWM Control GUI
 
@@ -18,7 +17,7 @@ The program:
     - Displays live temperature
     - Displays live PWM
     - Displays live direction
-    - Displays Arduino time
+    - Displays Arduino times
     - Plots temperature
     - Plots PWM
     - Uses red for HEAT
@@ -26,6 +25,10 @@ The program:
     - Saves measurements to CSV
     - Allows manual PWM control
     - Clamps PWM to 0-255
+    - Automatically sets PWM to 0 if temperature
+      is outside the 10-45 °C range
+    - Allows manual PWM control again when temperature
+      returns inside the 10-45 °C range
     - Does NOT implement feedback control
 """
 
@@ -50,6 +53,12 @@ TEMP_MAX = 100
 # PWM limits.
 PWM_MIN = 0
 PWM_MAX = 255
+
+# Safe temperature range.
+SAFE_TEMP_MIN = 0
+SAFE_TEMP_MAX = 60
+
+
 
 # CSV output file.
 CSV_FILENAME = "temperature_data.csv"
@@ -125,12 +134,14 @@ def parse_arduino_line(line):
         return None
 
     try:
+
         temperature = float(match.group(1))
         time_s = float(match.group(2))
         pwm = int(match.group(3))
         heat_cool = int(match.group(4))
 
     except ValueError:
+
         return None
 
     # Extra safety: make sure PWM is inside
@@ -515,6 +526,15 @@ class ArduinoWindow(QMainWindow):
 
 
         # ====================================================
+        # TEMPERATURE SAFETY STATE
+        # ====================================================
+
+        # True = manual PWM is allowed.
+        # False = temperature safety cutoff is active.
+        self.temperature_safe = True
+
+
+        # ====================================================
         # SET MAIN WINDOW WIDGET
         # ====================================================
 
@@ -670,16 +690,61 @@ class ArduinoWindow(QMainWindow):
         """
         Send the PWM and direction to the Arduino.
 
-        Example:
-
-            SET PWM 120 DIR HEAT
-
-        or:
-
-            SET PWM 45 DIR COOL
+        Manual PWM is not allowed when the temperature
+        is outside the safe range of 10-45 °C.
         """
 
-        # Get PWM from the text box.
+        # ----------------------------------------------------
+        # SAFETY CHECK
+        # ----------------------------------------------------
+
+        if not self.temperature_safe:
+
+            # Preserve the currently selected direction.
+            if self.direction_button.isChecked():
+
+                direction = "HEAT"
+
+            else:
+
+                direction = "COOL"
+
+
+            # Force PWM to zero.
+            command = (
+                f"SET PWM 0 DIR {direction}\n"
+            )
+
+            try:
+
+                serial_port.write(
+                    command.encode("utf-8")
+                )
+
+                print(
+                    f"Safety cutoff active: "
+                    f"SET PWM 0 DIR {direction}"
+                )
+
+            except serial.SerialException as error:
+
+                print(
+                    f"Serial send error: {error}"
+                )
+
+
+            # Keep GUI at zero.
+            self.pwm_slider.setValue(0)
+
+            self.pwm_text.setText("0")
+
+            return
+
+
+        # ----------------------------------------------------
+        # GET PWM FROM TEXT BOX
+        # ----------------------------------------------------
+
         try:
 
             pwm = int(
@@ -691,14 +756,20 @@ class ArduinoWindow(QMainWindow):
             pwm = self.pwm_slider.value()
 
 
-        # Clamp PWM.
+        # ----------------------------------------------------
+        # CLAMP PWM
+        # ----------------------------------------------------
+
         pwm = max(
             PWM_MIN,
             min(PWM_MAX, pwm)
         )
 
 
-        # Synchronize GUI.
+        # ----------------------------------------------------
+        # SYNCHRONIZE GUI
+        # ----------------------------------------------------
+
         self.pwm_slider.setValue(
             pwm
         )
@@ -708,7 +779,9 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        # Determine direction.
+        # ----------------------------------------------------
+        # DETERMINE DIRECTION
+        # ----------------------------------------------------
 
         if self.direction_button.isChecked():
 
@@ -719,20 +792,25 @@ class ArduinoWindow(QMainWindow):
             direction = "COOL"
 
 
-        # Build the command exactly as required.
+        # ----------------------------------------------------
+        # BUILD COMMAND
+        # ----------------------------------------------------
+
         command = (
             f"SET PWM {pwm} DIR {direction}\n"
         )
 
 
+        # ----------------------------------------------------
+        # SEND COMMAND
+        # ----------------------------------------------------
+
         try:
 
-            # Send command to Arduino.
             serial_port.write(
                 command.encode("utf-8")
             )
 
-            # Print only the command we intentionally sent.
             print(
                 f"Sent: SET PWM {pwm} DIR {direction}"
             )
@@ -749,7 +827,7 @@ class ArduinoWindow(QMainWindow):
     # ========================================================
 
     def read_serial(self):
-        
+
         """
         Read measurement lines from Arduino.
 
@@ -774,7 +852,10 @@ class ArduinoWindow(QMainWindow):
                 continue
 
 
-            # Parse the measurement.
+            # ------------------------------------------------
+            # PARSE MEASUREMENT
+            # ------------------------------------------------
+
             result = parse_arduino_line(
                 line
             )
@@ -792,7 +873,81 @@ class ArduinoWindow(QMainWindow):
                 pwm,
                 heat_cool
             ) = result
+
+
             self.temperature = temperature
+
+
+            # =================================================
+            # TEMPERATURE SAFETY LIMIT
+            # =================================================
+
+            if (
+                temperature < SAFE_TEMP_MIN
+                or
+                temperature > SAFE_TEMP_MAX
+            ):
+
+                # Only print the message when we first
+                # enter the unsafe state.
+                if self.temperature_safe:
+
+                    print(
+                        "Safety cutoff: Temperature outside "
+                        "10-45 °C, PWM set to 0"
+                    )
+
+
+                # Disable manual PWM.
+                self.temperature_safe = False
+
+
+                # Determine the currently selected direction.
+                if self.direction_button.isChecked():
+
+                    direction = "HEAT"
+
+                else:
+
+                    direction = "COOL"
+
+
+                # Force Arduino PWM to zero.
+                try:
+
+                    command = (
+                        f"SET PWM 0 DIR {direction}\n"
+                    )
+
+                    serial_port.write(
+                        command.encode("utf-8")
+                    )
+
+                except serial.SerialException as error:
+
+                    print(
+                        f"Serial send error: {error}"
+                    )
+
+
+                # Force GUI controls to zero.
+                self.pwm_slider.setValue(0)
+
+                self.pwm_text.setText("0")
+
+
+            else:
+
+                # Temperature has returned to the safe range.
+                if not self.temperature_safe:
+
+                    print(
+                        "Temperature back inside 10-45 °C. "
+                        "Manual PWM enabled."
+                    )
+
+
+                self.temperature_safe = True
 
 
             # =================================================
@@ -1084,4 +1239,3 @@ window.show()
 sys.exit(
     app.exec()
 )
-

@@ -1,58 +1,88 @@
 """
 Arduino Temperature + PWM Control GUI
 
+PURE FIXED-GAIN P CONTROLLER
+WITH THERMAL EQUILIBRIUM ENVELOPE
+
 Python communicates with the Arduino over COM3.
 
-Arduino sends measurements such as:
+Arduino sends:
 
 Temperature (C): 27.73, Time (s): 645.06,
 PWM: 120, Heat/Cool: 1
 
-Python sends commands such as:
+Python sends:
 
 SET PWM 120 DIR HEAT
 SET PWM 45 DIR COOL
 
-------------------------------------------------------------
-AUTOMATIC TEMPERATURE CONTROL
-------------------------------------------------------------
 
-The experimentally measured equilibrium data was measured
-after approximately 5 minutes.
+============================================================
+CONTROL ALGORITHM
+============================================================
 
-Heating:
+The experimentally measured thermal equilibrium is:
 
-    T = 22.77 + 0.5049 * PWM
+HEATING:
 
-Cooling:
+    T = 22.7673 + 0.50489 * PWM
 
-    T = 23.11 + 0.1528 * PWM
+COOLING:
 
-Those equations describe STEADY-STATE behavior.
+    T = 23.1063 + 0.15280 * PWM_signed
 
-The controller therefore uses:
+where:
 
-    1. Equilibrium feed-forward
-    2. Stronger transient proportional control
-    3. Reduced proportional correction near the target
-    4. Gentle holding control once near the target
+    PWM_signed > 0  -> HEAT
+    PWM_signed < 0  -> COOL
 
-The objective is to approach the desired temperature quickly
-(approximately 1 minute where the thermal system permits)
-and then maintain the temperature.
 
-Signed PWM convention:
+The equilibrium model is used to estimate the PWM required
+to maintain the desired temperature.
+
+The controller then adds a FIXED-GAIN proportional correction:
+
+    error = desired_temperature - measured_temperature
+
+    P_correction = KP * error
+
+    PWM_command =
+        equilibrium_PWM
+        +
+        P_correction
+
+
+Therefore:
+
+    PWM = PWM_EQ + KP * error
+
+
+KP IS CONSTANT.
+
+There is:
+
+    - No gain scheduling
+    - No transient gain
+    - No hold gain
+    - No integral
+    - No derivative
+
+
+============================================================
+SIGNED PWM
+============================================================
 
     +PWM = HEAT
     -PWM = COOL
 
-The Arduino itself still receives:
 
-    SET PWM <positive magnitude> DIR HEAT
+The Arduino still receives a positive PWM magnitude:
 
-or
+    SET PWM <magnitude> DIR HEAT
 
-    SET PWM <positive magnitude> DIR COOL
+or:
+
+    SET PWM <magnitude> DIR COOL
 """
 
 
@@ -91,136 +121,150 @@ DEFAULT_DESIRED_TEMP = 25.0
 
 
 # ============================================================
-# EQUILIBRIUM MODEL
+# FIXED PROPORTIONAL GAIN
 # ============================================================
 
-# These came from the measured 5-minute equilibrium data.
+"""
+THIS IS THE ONLY CONTROLLER GAIN.
 
-# Heating:
-#
-# T = 22.7673 + 0.50489 * PWM
+Change this value to tune the proportional response.
+
+Example:
+
+    KP = 3.0
+
+If the temperature is 2 °C below target:
+
+    P = 3.0 * 2
+      = 6 PWM
+
+If the temperature is 1 °C above target:
+
+    P = 3.0 * (-1)
+      = -3 PWM
+"""
+
+KP = 3.0
+
+print(f"KP = {KP}")
+
+
+# ============================================================
+# THERMAL EQUILIBRIUM MODEL
+# ============================================================
+
+"""
+Experimental steady-state measurements:
+
+HEATING:
+
+    T = 22.7673 + 0.50489 * PWM
+
+COOLING:
+
+    T = 23.1063 + 0.15280 * PWM_signed
+
+For cooling, PWM_signed is negative.
+
+Therefore:
+
+    T = 23.1063 + 0.15280 * (-PWM)
+
+or:
+
+    T = 23.1063 - 0.15280 * PWM_magnitude
+"""
 
 HEAT_INTERCEPT = 22.7673
 HEAT_SLOPE = 0.50489
-
-
-# Cooling:
-#
-# T = 23.1063 + 0.15280 * PWM_signed
 
 COOL_INTERCEPT = 23.1063
 COOL_SLOPE = 0.15280
 
 
 # ============================================================
-# TRANSIENT CONTROL
+# EQUILIBRIUM PWM FUNCTION
 # ============================================================
 
-"""
-These gains are intentionally stronger than the previous
-holding controller.
+def calculate_equilibrium_pwm(
+    target_temperature
+):
+    """
+    Calculate the signed PWM predicted to produce the
+    desired temperature at thermal equilibrium.
 
-The equilibrium model gives us the long-term PWM.
+    Positive result:
+        HEAT
 
-The transient proportional term provides the extra PWM
-needed to move toward the target more quickly.
+    Negative result:
+        COOL
+    """
 
-If the system overshoots:
-    decrease these values.
+    # --------------------------------------------------------
+    # HEATING SIDE
+    # --------------------------------------------------------
 
-If the system approaches too slowly:
-    increase them.
+    if target_temperature >= 23.0:
 
-The cooling system is often weaker/slower than heating,
-so its gain is larger.
-"""
+        pwm = (
+            target_temperature
+            -
+            HEAT_INTERCEPT
+        ) / HEAT_SLOPE
 
-HEAT_TRANSIENT_KP = 3.0
-
-COOL_TRANSIENT_KP = 4.0
-
-
-# ============================================================
-# HOLD CONTROL
-# ============================================================
-
-"""
-Once close to the desired temperature, the controller should
-not continue using the strong transient correction.
-
-These smaller gains are used for temperature holding.
-"""
-
-HEAT_HOLD_KP = 0.60
-
-COOL_HOLD_KP = 1.00
+        return pwm
 
 
-# ============================================================
-# TEMPERATURE ERROR REGIONS
-# ============================================================
+    # --------------------------------------------------------
+    # COOLING SIDE
+    # --------------------------------------------------------
 
-"""
-FAR_ERROR:
+    pwm = (
+        target_temperature
+        -
+        COOL_INTERCEPT
+    ) / COOL_SLOPE
 
-When the temperature is far from the target, use stronger
-transient control.
-
-NEAR_ERROR:
-
-When approaching the target, gradually reduce the
-transient correction.
-
-HOLD_ERROR:
-
-Inside this range the controller behaves mainly as a
-temperature holding controller.
-"""
-
-FAR_ERROR = 3.0
-
-NEAR_ERROR = 1.0
-
-HOLD_ERROR = 0.20
+    return pwm
 
 
 # ============================================================
-# TEMPERATURE DEAD BAND
+# EQUILIBRIUM TEMPERATURE FUNCTION
 # ============================================================
 
-"""
-Inside this temperature error, don't chase tiny fluctuations.
-"""
+def calculate_equilibrium_temperature(
+    signed_pwm
+):
+    """
+    Calculate the temperature predicted by the experimental
+    thermal equilibrium envelope for a given signed PWM.
 
-TEMPERATURE_DEADBAND = 0.15
+    Positive PWM:
+        Heating model
 
+    Negative PWM:
+        Cooling model
+    """
 
-# ============================================================
-# ZERO PWM EQUILIBRIUM REGION
-# ============================================================
+    if signed_pwm >= 0:
 
-ZERO_PWM_TEMP_LOW = 22.7
+        return (
+            HEAT_INTERCEPT
+            +
+            HEAT_SLOPE
+            *
+            signed_pwm
+        )
 
-ZERO_PWM_TEMP_HIGH = 23.2
+    else:
 
-
-# ============================================================
-# MINIMUM PWM
-# ============================================================
-
-"""
-Very small PWM values may have little physical effect.
-
-This prevents the controller from repeatedly commanding
-1-2 PWM when it would be effectively meaningless.
-
-The value is only used when the controller is sufficiently
-far from the target.
-
-Near the target, PWM can still go to zero.
-"""
-
-MIN_EFFECTIVE_PWM = 3
+        return (
+            COOL_INTERCEPT
+            +
+            COOL_SLOPE
+            *
+            signed_pwm
+        )
 
 
 # ============================================================
@@ -389,12 +433,12 @@ class ArduinoWindow(QMainWindow):
 
 
         self.setWindowTitle(
-            "Arduino Temperature + PWM Control"
+            "Arduino Temperature + Fixed Kp Control"
         )
 
         self.resize(
             1150,
-            900
+            950
         )
 
 
@@ -622,8 +666,12 @@ class ArduinoWindow(QMainWindow):
         controller_layout = QHBoxLayout()
 
 
-        self.feedforward_label = QLabel(
-            "FF: --"
+        self.gain_label = QLabel(
+            f"Kp: {KP:.3f}"
+        )
+
+        self.equilibrium_label = QLabel(
+            "EQ PWM: --"
         )
 
         self.error_label = QLabel(
@@ -640,7 +688,11 @@ class ArduinoWindow(QMainWindow):
 
 
         controller_layout.addWidget(
-            self.feedforward_label
+            self.gain_label
+        )
+
+        controller_layout.addWidget(
+            self.equilibrium_label
         )
 
         controller_layout.addWidget(
@@ -1079,9 +1131,10 @@ class ArduinoWindow(QMainWindow):
         if self.auto_control:
 
             print(
-                f"Automatic control ON. "
+                f"Automatic control ON | "
                 f"Target = "
-                f"{self.desired_temperature:.2f} °C"
+                f"{self.desired_temperature:.2f} °C | "
+                f"Kp = {KP:.3f}"
             )
 
         else:
@@ -1113,8 +1166,12 @@ class ArduinoWindow(QMainWindow):
             )
 
 
-            self.feedforward_label.setText(
-                "FF: --"
+            self.gain_label.setText(
+                f"Kp: {KP:.3f}"
+            )
+
+            self.equilibrium_label.setText(
+                "EQ PWM: --"
             )
 
             self.error_label.setText(
@@ -1131,65 +1188,6 @@ class ArduinoWindow(QMainWindow):
 
 
     # ========================================================
-    # EQUILIBRIUM FEED-FORWARD
-    # ========================================================
-
-    def calculate_feedforward_pwm(
-        self,
-        target_temperature
-    ):
-        """
-        Calculate the steady-state PWM required by the
-        experimentally measured equilibrium model.
-
-        Positive = HEAT
-        Negative = COOL
-        """
-
-        # ----------------------------------------------------
-        # Near natural equilibrium.
-        # ----------------------------------------------------
-
-        if (
-            ZERO_PWM_TEMP_LOW
-            <=
-            target_temperature
-            <=
-            ZERO_PWM_TEMP_HIGH
-        ):
-
-            return 0.0
-
-
-        # ----------------------------------------------------
-        # HEATING
-        # ----------------------------------------------------
-
-        if target_temperature > ZERO_PWM_TEMP_HIGH:
-
-            pwm = (
-                target_temperature
-                -
-                HEAT_INTERCEPT
-            ) / HEAT_SLOPE
-
-            return pwm
-
-
-        # ----------------------------------------------------
-        # COOLING
-        # ----------------------------------------------------
-
-        pwm = (
-            target_temperature
-            -
-            COOL_INTERCEPT
-        ) / COOL_SLOPE
-
-        return pwm
-
-
-    # ========================================================
     # AUTOMATIC TEMPERATURE CONTROL
     # ========================================================
 
@@ -1198,19 +1196,23 @@ class ArduinoWindow(QMainWindow):
         temperature
     ):
         """
-        Two-stage controller.
+        Fixed-gain P controller with thermal equilibrium
+        feed-forward.
 
-        FAR FROM TARGET:
-            Strong transient proportional control.
+        Algorithm:
 
-        NEAR TARGET:
-            Gradually reduce the transient correction.
+            error = target - measured_temperature
 
-        AT TARGET:
-            Mainly use equilibrium feed-forward.
+            equilibrium_pwm =
+                experimentally predicted PWM
+                required to maintain target
 
-        This provides a faster approach while avoiding the
-        use of an excessively large equilibrium multiplier.
+            p_correction = KP * error
+
+            signed_pwm =
+                equilibrium_pwm
+                +
+                p_correction
         """
 
         if not self.auto_control:
@@ -1223,9 +1225,9 @@ class ArduinoWindow(QMainWindow):
             return
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # TEMPERATURE ERROR
-        # ----------------------------------------------------
+        # ====================================================
 
         error = (
             self.desired_temperature
@@ -1234,167 +1236,41 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        absolute_error = abs(
-            error
-        )
+        # ====================================================
+        # EQUILIBRIUM PWM
+        # ====================================================
 
-
-        # ----------------------------------------------------
-        # EQUILIBRIUM FEED-FORWARD
-        # ----------------------------------------------------
-
-        feedforward_pwm = (
-            self.calculate_feedforward_pwm(
+        equilibrium_pwm_value = (
+            calculate_equilibrium_pwm(
                 self.desired_temperature
             )
         )
 
 
         # ====================================================
-        # PROPORTIONAL CONTROL
+        # FIXED-GAIN PROPORTIONAL CORRECTION
         # ====================================================
 
-        if absolute_error <= HOLD_ERROR:
-
-            # ------------------------------------------------
-            # HOLD MODE
-            # ------------------------------------------------
-
-            if error > 0:
-
-                p_correction = (
-                    HEAT_HOLD_KP
-                    *
-                    error
-                )
-
-            else:
-
-                p_correction = (
-                    COOL_HOLD_KP
-                    *
-                    error
-                )
-
-
-        elif absolute_error < NEAR_ERROR:
-
-            # ------------------------------------------------
-            # APPROACH MODE
-            #
-            # Blend between transient and hold gains.
-            # ------------------------------------------------
-
-            if error > 0:
-
-                transient_gain = (
-                    HEAT_TRANSIENT_KP
-                )
-
-                hold_gain = (
-                    HEAT_HOLD_KP
-                )
-
-            else:
-
-                transient_gain = (
-                    COOL_TRANSIENT_KP
-                )
-
-                hold_gain = (
-                    COOL_HOLD_KP
-                )
-
-
-            blend = (
-                absolute_error
-                -
-                HOLD_ERROR
-            ) / (
-                NEAR_ERROR
-                -
-                HOLD_ERROR
-            )
-
-
-            gain = (
-                hold_gain
-                +
-                (
-                    transient_gain
-                    -
-                    hold_gain
-                )
-                *
-                blend
-            )
-
-
-            p_correction = (
-                gain
-                *
-                error
-            )
-
-
-        else:
-
-            # ------------------------------------------------
-            # STRONG TRANSIENT MODE
-            # ------------------------------------------------
-
-            if error > 0:
-
-                p_correction = (
-                    HEAT_TRANSIENT_KP
-                    *
-                    error
-                )
-
-            else:
-
-                p_correction = (
-                    COOL_TRANSIENT_KP
-                    *
-                    error
-                )
+        p_correction = (
+            KP
+            *
+            error
+        )
 
 
         # ====================================================
-        # ADD FEED-FORWARD + CORRECTION
+        # EQUILIBRIUM ENVELOPE + P CONTROL
         # ====================================================
 
         signed_pwm = (
-            feedforward_pwm
+            equilibrium_pwm_value
             +
             p_correction
         )
 
 
         # ====================================================
-        # SPECIAL CASE:
-        # TARGET NEAR NATURAL TEMPERATURE
-        # ====================================================
-
-        if (
-            abs(
-                self.desired_temperature
-                -
-                23.0
-            )
-            <
-            0.30
-            and
-            absolute_error
-            <
-            0.30
-        ):
-
-            signed_pwm = 0.0
-
-
-        # ====================================================
-        # CLAMP
+        # CLAMP PWM
         # ====================================================
 
         signed_pwm = max(
@@ -1404,33 +1280,6 @@ class ArduinoWindow(QMainWindow):
                 signed_pwm
             )
         )
-
-
-        # ====================================================
-        # REMOVE TINY PWM
-        # ====================================================
-
-        if (
-            absolute_error
-            >
-            HOLD_ERROR
-            and
-            abs(signed_pwm)
-            <
-            MIN_EFFECTIVE_PWM
-        ):
-
-            if signed_pwm > 0:
-
-                signed_pwm = (
-                    MIN_EFFECTIVE_PWM
-                )
-
-            elif signed_pwm < 0:
-
-                signed_pwm = (
-                    -MIN_EFFECTIVE_PWM
-                )
 
 
         # ====================================================
@@ -1470,40 +1319,48 @@ class ArduinoWindow(QMainWindow):
 
 
         # ====================================================
+        # PREDICTED EQUILIBRIUM TEMPERATURE
+        # ====================================================
+
+        predicted_temperature = (
+            calculate_equilibrium_temperature(
+                signed_pwm
+            )
+        )
+
+
+        # ====================================================
         # CONTROLLER DISPLAY
         # ====================================================
 
-        if absolute_error > NEAR_ERROR:
-
-            control_mode = "FAST"
-
-        elif absolute_error > HOLD_ERROR:
-
-            control_mode = "APPROACH"
-
-        else:
-
-            control_mode = "HOLD"
+        self.gain_label.setText(
+            f"Kp: {KP:.3f}"
+        )
 
 
-        self.feedforward_label.setText(
-            f"FF: {feedforward_pwm:+.1f}"
+        self.equilibrium_label.setText(
+            f"EQ PWM: "
+            f"{equilibrium_pwm_value:+.1f}"
         )
 
 
         self.error_label.setText(
-            f"Error: {error:+.2f} °C"
+            f"Error: "
+            f"{error:+.2f} °C"
         )
 
 
         self.p_correction_label.setText(
-            f"P: {p_correction:+.1f}"
+            f"P: "
+            f"{p_correction:+.1f}"
         )
 
 
         self.command_label.setText(
-            f"{control_mode} | "
-            f"PWM: {signed_pwm:+d}"
+            f"PWM: "
+            f"{signed_pwm:+d} | "
+            f"EQ T: "
+            f"{predicted_temperature:.2f} °C"
         )
 
 
@@ -1577,13 +1434,15 @@ class ArduinoWindow(QMainWindow):
 
         print(
             f"AUTO | "
-            f"Mode={control_mode} | "
             f"Target={self.desired_temperature:.2f} °C | "
             f"Temp={temperature:.2f} °C | "
             f"Error={error:+.2f} °C | "
-            f"FF={feedforward_pwm:+.1f} | "
-            f"P={p_correction:+.1f} | "
-            f"PWM={signed_pwm:+d}"
+            f"EQ_PWM={equilibrium_pwm_value:+.2f} | "
+            f"Kp={KP:.3f} | "
+            f"P={p_correction:+.2f} | "
+            f"PWM={signed_pwm:+d} | "
+            f"EQ_T={predicted_temperature:.2f} °C | "
+            f"Direction={direction}"
         )
 
 
@@ -2182,8 +2041,6 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        # Keep physical limits.
-
         pwm_axis_min = max(
             -PWM_MAX,
             pwm_axis_min
@@ -2397,6 +2254,21 @@ class ArduinoWindow(QMainWindow):
     ):
 
         self.timer.stop()
+
+
+        # ----------------------------------------------------
+        # SAFETY: STOP OUTPUT
+        # ----------------------------------------------------
+
+        try:
+
+            serial_port.write(
+                b"SET PWM 0 DIR HEAT\n"
+            )
+
+        except Exception:
+
+            pass
 
 
         if serial_port.is_open:

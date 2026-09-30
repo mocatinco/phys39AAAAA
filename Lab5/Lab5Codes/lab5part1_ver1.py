@@ -13,59 +13,48 @@ Python sends commands such as:
 SET PWM 120 DIR HEAT
 SET PWM 45 DIR COOL
 
+------------------------------------------------------------
+AUTOMATIC TEMPERATURE CONTROL
+------------------------------------------------------------
 
-============================================================
-AUTOMATIC PROPORTIONAL TEMPERATURE CONTROL
-============================================================
+The experimentally measured equilibrium data was measured
+after approximately 5 minutes.
 
-The controller uses:
+Heating:
 
-    e = T_set - T
+    T = 22.77 + 0.5049 * PWM
 
-    u = Kp * e
+Cooling:
 
-Positive u:
-    HEAT
+    T = 23.11 + 0.1528 * PWM
 
-Negative u:
-    COOL
+Those equations describe STEADY-STATE behavior.
 
-PWM magnitude:
+The controller therefore uses:
 
-    P = |u|
+    1. Equilibrium feed-forward
+    2. Stronger transient proportional control
+    3. Reduced proportional correction near the target
+    4. Gentle holding control once near the target
 
-Therefore:
+The objective is to approach the desired temperature quickly
+(approximately 1 minute where the thermal system permits)
+and then maintain the temperature.
+
+Signed PWM convention:
 
     +PWM = HEAT
     -PWM = COOL
 
-At exactly the desired temperature:
+The Arduino itself still receives:
 
-    error = 0
-    PWM = 0
+    SET PWM <positive magnitude> DIR HEAT
 
-If temperature moves away from the setpoint, the
-controller automatically applies a small correction.
+or
 
-Heating and cooling have separate proportional gains
-because the measured system response is very different
-for heating and cooling.
-
-The Arduino should perform the thermistor averaging:
-
-    ~1000 raw voltage measurements
-             ↓
-        average voltage
-             ↓
-        voltage → temperature
-             ↓
-        send temperature to Python
-
-
-============================================================
-CONTROL PARAMETERS
-============================================================
+    SET PWM <positive magnitude> DIR COOL
 """
+
 
 # ============================================================
 # SETTINGS
@@ -78,119 +67,160 @@ WINDOW_SECONDS = 60
 
 UPDATE_INTERVAL_MS = 100
 
-
-# ============================================================
-# TEMPERATURE GRAPH
-# ============================================================
-
+# Temperature graph limits.
 TEMP_MIN = 0
 TEMP_MAX = 100
 
-
-# ============================================================
-# PWM LIMITS
-# ============================================================
-
+# PWM magnitude limits.
 PWM_MIN = 0
 PWM_MAX = 255
 
-
-# ============================================================
-# SAFETY TEMPERATURE RANGE
-# ============================================================
-
+# Safe temperature range.
 SAFE_TEMP_MIN = 0
 SAFE_TEMP_MAX = 60
 
-
-# ============================================================
-# CSV FILE
-# ============================================================
-
+# CSV output file.
 CSV_FILENAME = "temperature_data.csv"
 
 
 # ============================================================
-# DEFAULT DESIRED TEMPERATURE
+# DESIRED TEMPERATURE
 # ============================================================
 
 DEFAULT_DESIRED_TEMP = 25.0
 
 
 # ============================================================
-# PROPORTIONAL GAINS
+# EQUILIBRIUM MODEL
 # ============================================================
 
-"""
-Your measured equilibrium data showed approximately:
+# These came from the measured 5-minute equilibrium data.
 
-Heating:
+# Heating:
+#
+# T = 22.7673 + 0.50489 * PWM
 
-    dT/dPWM ≈ +0.505 °C/PWM
+HEAT_INTERCEPT = 22.7673
+HEAT_SLOPE = 0.50489
 
-Cooling:
 
-    dT/dPWM ≈ -0.153 °C/PWM
+# Cooling:
+#
+# T = 23.1063 + 0.15280 * PWM_signed
 
-Cooling is therefore substantially less sensitive than
-heating.
-
-The gains below are starting values.
-
-If heating is too aggressive:
-    reduce KP_HEAT.
-
-If heating is too slow:
-    increase KP_HEAT.
-
-If cooling is too aggressive:
-    reduce KP_COOL.
-
-If cooling is too slow:
-    increase KP_COOL.
-"""
-
-KP_HEAT = 8.0
-
-KP_COOL = 20.0
+COOL_INTERCEPT = 23.1063
+COOL_SLOPE = 0.15280
 
 
 # ============================================================
-# SMALL TEMPERATURE DEAD BAND
+# TRANSIENT CONTROL
 # ============================================================
 
 """
-Inside this very small range, PWM is set to zero.
+These gains are intentionally stronger than the previous
+holding controller.
 
-This prevents rapid switching caused by tiny temperature
-measurement fluctuations.
+The equilibrium model gives us the long-term PWM.
 
-The deadband is intentionally small so the controller can
-still make minor corrections around the desired temperature.
+The transient proportional term provides the extra PWM
+needed to move toward the target more quickly.
+
+If the system overshoots:
+    decrease these values.
+
+If the system approaches too slowly:
+    increase them.
+
+The cooling system is often weaker/slower than heating,
+so its gain is larger.
 """
 
-TEMPERATURE_DEADBAND = 0.05
+HEAT_TRANSIENT_KP = 3.0
+
+COOL_TRANSIENT_KP = 4.0
 
 
 # ============================================================
-# PWM SLEW LIMIT
+# HOLD CONTROL
 # ============================================================
 
 """
-Maximum change in PWM magnitude per controller update.
+Once close to the desired temperature, the controller should
+not continue using the strong transient correction.
 
-This prevents commands such as:
-
-    0 → 100
-
-from happening instantly.
-
-Because UPDATE_INTERVAL_MS is 100 ms, a value of 10 means
-PWM can change by at most approximately 10 counts per
-100 ms update.
+These smaller gains are used for temperature holding.
 """
 
-MAX_PWM_CHANGE = 10
+HEAT_HOLD_KP = 0.60
+
+COOL_HOLD_KP = 1.00
+
+
+# ============================================================
+# TEMPERATURE ERROR REGIONS
+# ============================================================
+
+"""
+FAR_ERROR:
+
+When the temperature is far from the target, use stronger
+transient control.
+
+NEAR_ERROR:
+
+When approaching the target, gradually reduce the
+transient correction.
+
+HOLD_ERROR:
+
+Inside this range the controller behaves mainly as a
+temperature holding controller.
+"""
+
+FAR_ERROR = 3.0
+
+NEAR_ERROR = 1.0
+
+HOLD_ERROR = 0.20
+
+
+# ============================================================
+# TEMPERATURE DEAD BAND
+# ============================================================
+
+"""
+Inside this temperature error, don't chase tiny fluctuations.
+"""
+
+TEMPERATURE_DEADBAND = 0.15
+
+
+# ============================================================
+# ZERO PWM EQUILIBRIUM REGION
+# ============================================================
+
+ZERO_PWM_TEMP_LOW = 22.7
+
+ZERO_PWM_TEMP_HIGH = 23.2
+
+
+# ============================================================
+# MINIMUM PWM
+# ============================================================
+
+"""
+Very small PWM values may have little physical effect.
+
+This prevents the controller from repeatedly commanding
+1-2 PWM when it would be effectively meaningless.
+
+The value is only used when the controller is sufficiently
+far from the target.
+
+Near the target, PWM can still go to zero.
+"""
+
+MIN_EFFECTIVE_PWM = 3
 
 
 # ============================================================
@@ -224,18 +254,6 @@ import pyqtgraph as pg
 # ARDUINO MEASUREMENT PARSER
 # ============================================================
 
-"""
-Expected Arduino line:
-
-Temperature (C): 27.73, Time (s): 645.06,
-PWM: 120, Heat/Cool: 1
-
-Heat/Cool:
-
-    1 = HEAT
-    0 = COOL
-"""
-
 LINE_PATTERN = re.compile(
     r"Temperature \(C\):\s*([-+]?\d+(?:\.\d+)?)"
     r",\s*Time \(s\):\s*([-+]?\d+(?:\.\d+)?)"
@@ -246,7 +264,7 @@ LINE_PATTERN = re.compile(
 
 def parse_arduino_line(line):
     """
-    Parse one measurement line from Arduino.
+    Parse one measurement line from the Arduino.
 
     Returns:
 
@@ -255,7 +273,7 @@ def parse_arduino_line(line):
         pwm
         heat_cool
 
-    Returns None if the line is malformed.
+    Returns None if malformed.
     """
 
     match = LINE_PATTERN.fullmatch(
@@ -289,8 +307,6 @@ def parse_arduino_line(line):
 
         return None
 
-
-    # Extra PWM safety clamp.
 
     pwm = max(
         PWM_MIN,
@@ -327,8 +343,6 @@ csv_writer = csv.writer(
 csv_writer.writerow([
     "time_s",
     "temperature_C",
-    "setpoint_C",
-    "error_C",
     "pwm_signed",
     "heat_cool"
 ])
@@ -378,15 +392,14 @@ class ArduinoWindow(QMainWindow):
             "Arduino Temperature + PWM Control"
         )
 
-
         self.resize(
             1150,
-            1000
+            900
         )
 
 
         # ====================================================
-        # CONTROLLER STATE
+        # CONTROL STATE
         # ====================================================
 
         self.desired_temperature = (
@@ -397,12 +410,7 @@ class ArduinoWindow(QMainWindow):
 
         self.temperature_safe = True
 
-        # Signed PWM:
-
-        # positive = HEAT
-        # negative = COOL
-
-        self.current_signed_pwm = 0
+        self.last_auto_signed_pwm = None
 
 
         # ====================================================
@@ -438,11 +446,9 @@ class ArduinoWindow(QMainWindow):
 
         self.update_direction_button()
 
-
         self.direction_button.clicked.connect(
             self.direction_changed
         )
-
 
         control_layout.addWidget(
             self.direction_button
@@ -462,7 +468,6 @@ class ArduinoWindow(QMainWindow):
             Qt.Horizontal
         )
 
-
         self.pwm_slider.setMinimum(
             PWM_MIN
         )
@@ -475,11 +480,9 @@ class ArduinoWindow(QMainWindow):
             0
         )
 
-
         self.pwm_slider.valueChanged.connect(
             self.slider_changed
         )
-
 
         control_layout.addWidget(
             self.pwm_slider
@@ -498,11 +501,9 @@ class ArduinoWindow(QMainWindow):
             60
         )
 
-
         self.pwm_text.editingFinished.connect(
             self.text_pwm_changed
         )
-
 
         control_layout.addWidget(
             self.pwm_text
@@ -510,18 +511,16 @@ class ArduinoWindow(QMainWindow):
 
 
         # ----------------------------------------------------
-        # SEND BUTTON
+        # SEND
         # ----------------------------------------------------
 
         self.send_button = QPushButton(
             "Send"
         )
 
-
         self.send_button.clicked.connect(
             self.send_command
         )
-
 
         control_layout.addWidget(
             self.send_button
@@ -534,32 +533,26 @@ class ArduinoWindow(QMainWindow):
 
 
         # ====================================================
-        # DESIRED TEMPERATURE ROW
+        # TEMPERATURE CONTROL ROW
         # ====================================================
 
         target_layout = QHBoxLayout()
 
 
         target_layout.addWidget(
-            QLabel(
-                "Desired Temperature:"
-            )
+            QLabel("Desired Temperature:")
         )
 
 
         self.desired_temperature_text = (
             QLineEdit(
-                str(
-                    DEFAULT_DESIRED_TEMP
-                )
+                str(DEFAULT_DESIRED_TEMP)
             )
         )
-
 
         self.desired_temperature_text.setFixedWidth(
             80
         )
-
 
         target_layout.addWidget(
             self.desired_temperature_text
@@ -571,17 +564,13 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        self.set_temperature_button = (
-            QPushButton(
-                "Set Desired Temp"
-            )
+        self.set_temperature_button = QPushButton(
+            "Set Desired Temp"
         )
-
 
         self.set_temperature_button.clicked.connect(
             self.set_desired_temperature
         )
-
 
         target_layout.addWidget(
             self.set_temperature_button
@@ -593,33 +582,28 @@ class ArduinoWindow(QMainWindow):
             f"{self.desired_temperature:.2f} °C"
         )
 
-
         target_layout.addWidget(
             self.desired_temperature_label
         )
 
 
         # ----------------------------------------------------
-        # AUTO CONTROL BUTTON
+        # AUTO CONTROL
         # ----------------------------------------------------
 
         self.auto_button = QPushButton(
             "AUTO CONTROL OFF"
         )
 
-
         self.auto_button.setCheckable(
             True
         )
-
 
         self.auto_button.clicked.connect(
             self.auto_control_changed
         )
 
-
         self.update_auto_button()
-
 
         target_layout.addWidget(
             self.auto_button
@@ -632,26 +616,23 @@ class ArduinoWindow(QMainWindow):
 
 
         # ====================================================
-        # CONTROLLER STATUS
+        # CONTROLLER INFORMATION
         # ====================================================
 
         controller_layout = QHBoxLayout()
 
 
+        self.feedforward_label = QLabel(
+            "FF: --"
+        )
+
         self.error_label = QLabel(
             "Error: --"
         )
 
-
-        self.kp_label = QLabel(
-            "Kp: --"
+        self.p_correction_label = QLabel(
+            "P: --"
         )
-
-
-        self.requested_pwm_label = QLabel(
-            "Requested PWM: --"
-        )
-
 
         self.command_label = QLabel(
             "Command: --"
@@ -659,19 +640,16 @@ class ArduinoWindow(QMainWindow):
 
 
         controller_layout.addWidget(
+            self.feedforward_label
+        )
+
+        controller_layout.addWidget(
             self.error_label
         )
 
-
         controller_layout.addWidget(
-            self.kp_label
+            self.p_correction_label
         )
-
-
-        controller_layout.addWidget(
-            self.requested_pwm_label
-        )
-
 
         controller_layout.addWidget(
             self.command_label
@@ -684,7 +662,7 @@ class ArduinoWindow(QMainWindow):
 
 
         # ====================================================
-        # LIVE DATA DISPLAY
+        # LIVE DATA
         # ====================================================
 
         live_layout = QHBoxLayout()
@@ -694,16 +672,13 @@ class ArduinoWindow(QMainWindow):
             "Temperature: -- °C"
         )
 
-
         self.time_label = QLabel(
             "Time: -- s"
         )
 
-
         self.live_pwm_label = QLabel(
             "PWM: --"
         )
-
 
         self.direction_label = QLabel(
             "Direction: --"
@@ -714,16 +689,13 @@ class ArduinoWindow(QMainWindow):
             self.temperature_label
         )
 
-
         live_layout.addWidget(
             self.time_label
         )
 
-
         live_layout.addWidget(
             self.live_pwm_label
         )
-
 
         live_layout.addWidget(
             self.direction_label
@@ -739,13 +711,11 @@ class ArduinoWindow(QMainWindow):
         # TEMPERATURE PLOT
         # ====================================================
 
-        self.temperature_plot = (
-            pg.PlotWidget()
-        )
+        self.temperature_plot = pg.PlotWidget()
 
 
         self.temperature_plot.setTitle(
-            "Temperature and Setpoint"
+            "Temperature vs Arduino Time"
         )
 
 
@@ -805,7 +775,7 @@ class ArduinoWindow(QMainWindow):
 
 
         # ----------------------------------------------------
-        # SETPOINT
+        # TARGET TEMPERATURE
         # ----------------------------------------------------
 
         self.desired_temperature_line = (
@@ -835,9 +805,7 @@ class ArduinoWindow(QMainWindow):
         # PWM PLOT
         # ====================================================
 
-        self.pwm_plot = (
-            pg.PlotWidget()
-        )
+        self.pwm_plot = pg.PlotWidget()
 
 
         self.pwm_plot.setTitle(
@@ -899,98 +867,8 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        # ----------------------------------------------------
-        # ZERO PWM LINE
-        # ----------------------------------------------------
-
-        self.zero_pwm_line = (
-            pg.InfiniteLine(
-                pos=0,
-                angle=0,
-                pen=pg.mkPen(
-                    color="gray",
-                    width=1,
-                    style=Qt.DashLine
-                )
-            )
-        )
-
-
-        self.pwm_plot.addItem(
-            self.zero_pwm_line
-        )
-
-
         main_layout.addWidget(
             self.pwm_plot
-        )
-
-
-        # ====================================================
-        # ERROR PLOT
-        # ====================================================
-
-        self.error_plot = (
-            pg.PlotWidget()
-        )
-
-
-        self.error_plot.setTitle(
-            "Temperature Error"
-        )
-
-
-        self.error_plot.setLabel(
-            "left",
-            "Error",
-            units="°C"
-        )
-
-
-        self.error_plot.setLabel(
-            "bottom",
-            "Arduino Time",
-            units="s"
-        )
-
-
-        self.error_plot.showGrid(
-            x=True,
-            y=True,
-            alpha=0.3
-        )
-
-
-        self.error_curve = (
-            self.error_plot.plot(
-                pen=pg.mkPen(
-                    color="purple",
-                    width=2
-                )
-            )
-        )
-
-
-        self.zero_error_line = (
-            pg.InfiniteLine(
-                pos=0,
-                angle=0,
-                pen=pg.mkPen(
-                    color="gray",
-                    width=1,
-                    style=Qt.DashLine
-                )
-            )
-        )
-
-
-        self.error_plot.addItem(
-            self.zero_error_line
-        )
-
-
-        main_layout.addWidget(
-            self.error_plot
         )
 
 
@@ -1001,10 +879,6 @@ class ArduinoWindow(QMainWindow):
         self.times = []
 
         self.temperatures = []
-
-        self.setpoints = []
-
-        self.errors = []
 
         self.pwms = []
 
@@ -1036,14 +910,13 @@ class ArduinoWindow(QMainWindow):
             self.read_serial
         )
 
-
         self.timer.start(
             UPDATE_INTERVAL_MS
         )
 
 
     # ========================================================
-    # DIRECTION BUTTON APPEARANCE
+    # DIRECTION BUTTON
     # ========================================================
 
     def update_direction_button(self):
@@ -1053,7 +926,6 @@ class ArduinoWindow(QMainWindow):
             self.direction_button.setText(
                 "HEAT"
             )
-
 
             self.direction_button.setStyleSheet(
                 """
@@ -1066,13 +938,11 @@ class ArduinoWindow(QMainWindow):
                 """
             )
 
-
         else:
 
             self.direction_button.setText(
                 "COOL"
             )
-
 
             self.direction_button.setStyleSheet(
                 """
@@ -1087,7 +957,7 @@ class ArduinoWindow(QMainWindow):
 
 
     # ========================================================
-    # AUTO BUTTON APPEARANCE
+    # AUTO BUTTON
     # ========================================================
 
     def update_auto_button(self):
@@ -1097,7 +967,6 @@ class ArduinoWindow(QMainWindow):
             self.auto_button.setText(
                 "AUTO CONTROL ON"
             )
-
 
             self.auto_button.setStyleSheet(
                 """
@@ -1110,13 +979,11 @@ class ArduinoWindow(QMainWindow):
                 """
             )
 
-
         else:
 
             self.auto_button.setText(
                 "AUTO CONTROL OFF"
             )
-
 
             self.auto_button.setStyleSheet(
                 """
@@ -1155,8 +1022,6 @@ class ArduinoWindow(QMainWindow):
             return
 
 
-        # Clamp desired temperature to safe range.
-
         desired_temperature = max(
             SAFE_TEMP_MIN,
             min(
@@ -1187,6 +1052,9 @@ class ArduinoWindow(QMainWindow):
         )
 
 
+        self.last_auto_signed_pwm = None
+
+
         print(
             f"Desired temperature set to "
             f"{desired_temperature:.2f} °C"
@@ -1203,32 +1071,24 @@ class ArduinoWindow(QMainWindow):
             self.auto_button.isChecked()
         )
 
-
         self.update_auto_button()
+
+        self.last_auto_signed_pwm = None
 
 
         if self.auto_control:
 
             print(
-                "Automatic proportional control ON."
-            )
-
-            print(
+                f"Automatic control ON. "
                 f"Target = "
                 f"{self.desired_temperature:.2f} °C"
             )
 
-
         else:
 
             print(
-                "Automatic proportional control OFF."
+                "Automatic control OFF."
             )
-
-
-            # Stop automatic control immediately.
-
-            self.current_signed_pwm = 0
 
 
             try:
@@ -1253,9 +1113,478 @@ class ArduinoWindow(QMainWindow):
             )
 
 
-            self.command_label.setText(
-                "Command: OFF"
+            self.feedforward_label.setText(
+                "FF: --"
             )
+
+            self.error_label.setText(
+                "Error: --"
+            )
+
+            self.p_correction_label.setText(
+                "P: --"
+            )
+
+            self.command_label.setText(
+                "Command: --"
+            )
+
+
+    # ========================================================
+    # EQUILIBRIUM FEED-FORWARD
+    # ========================================================
+
+    def calculate_feedforward_pwm(
+        self,
+        target_temperature
+    ):
+        """
+        Calculate the steady-state PWM required by the
+        experimentally measured equilibrium model.
+
+        Positive = HEAT
+        Negative = COOL
+        """
+
+        # ----------------------------------------------------
+        # Near natural equilibrium.
+        # ----------------------------------------------------
+
+        if (
+            ZERO_PWM_TEMP_LOW
+            <=
+            target_temperature
+            <=
+            ZERO_PWM_TEMP_HIGH
+        ):
+
+            return 0.0
+
+
+        # ----------------------------------------------------
+        # HEATING
+        # ----------------------------------------------------
+
+        if target_temperature > ZERO_PWM_TEMP_HIGH:
+
+            pwm = (
+                target_temperature
+                -
+                HEAT_INTERCEPT
+            ) / HEAT_SLOPE
+
+            return pwm
+
+
+        # ----------------------------------------------------
+        # COOLING
+        # ----------------------------------------------------
+
+        pwm = (
+            target_temperature
+            -
+            COOL_INTERCEPT
+        ) / COOL_SLOPE
+
+        return pwm
+
+
+    # ========================================================
+    # AUTOMATIC TEMPERATURE CONTROL
+    # ========================================================
+
+    def automatic_temperature_control(
+        self,
+        temperature
+    ):
+        """
+        Two-stage controller.
+
+        FAR FROM TARGET:
+            Strong transient proportional control.
+
+        NEAR TARGET:
+            Gradually reduce the transient correction.
+
+        AT TARGET:
+            Mainly use equilibrium feed-forward.
+
+        This provides a faster approach while avoiding the
+        use of an excessively large equilibrium multiplier.
+        """
+
+        if not self.auto_control:
+
+            return
+
+
+        if not self.temperature_safe:
+
+            return
+
+
+        # ----------------------------------------------------
+        # TEMPERATURE ERROR
+        # ----------------------------------------------------
+
+        error = (
+            self.desired_temperature
+            -
+            temperature
+        )
+
+
+        absolute_error = abs(
+            error
+        )
+
+
+        # ----------------------------------------------------
+        # EQUILIBRIUM FEED-FORWARD
+        # ----------------------------------------------------
+
+        feedforward_pwm = (
+            self.calculate_feedforward_pwm(
+                self.desired_temperature
+            )
+        )
+
+
+        # ====================================================
+        # PROPORTIONAL CONTROL
+        # ====================================================
+
+        if absolute_error <= HOLD_ERROR:
+
+            # ------------------------------------------------
+            # HOLD MODE
+            # ------------------------------------------------
+
+            if error > 0:
+
+                p_correction = (
+                    HEAT_HOLD_KP
+                    *
+                    error
+                )
+
+            else:
+
+                p_correction = (
+                    COOL_HOLD_KP
+                    *
+                    error
+                )
+
+
+        elif absolute_error < NEAR_ERROR:
+
+            # ------------------------------------------------
+            # APPROACH MODE
+            #
+            # Blend between transient and hold gains.
+            # ------------------------------------------------
+
+            if error > 0:
+
+                transient_gain = (
+                    HEAT_TRANSIENT_KP
+                )
+
+                hold_gain = (
+                    HEAT_HOLD_KP
+                )
+
+            else:
+
+                transient_gain = (
+                    COOL_TRANSIENT_KP
+                )
+
+                hold_gain = (
+                    COOL_HOLD_KP
+                )
+
+
+            blend = (
+                absolute_error
+                -
+                HOLD_ERROR
+            ) / (
+                NEAR_ERROR
+                -
+                HOLD_ERROR
+            )
+
+
+            gain = (
+                hold_gain
+                +
+                (
+                    transient_gain
+                    -
+                    hold_gain
+                )
+                *
+                blend
+            )
+
+
+            p_correction = (
+                gain
+                *
+                error
+            )
+
+
+        else:
+
+            # ------------------------------------------------
+            # STRONG TRANSIENT MODE
+            # ------------------------------------------------
+
+            if error > 0:
+
+                p_correction = (
+                    HEAT_TRANSIENT_KP
+                    *
+                    error
+                )
+
+            else:
+
+                p_correction = (
+                    COOL_TRANSIENT_KP
+                    *
+                    error
+                )
+
+
+        # ====================================================
+        # ADD FEED-FORWARD + CORRECTION
+        # ====================================================
+
+        signed_pwm = (
+            feedforward_pwm
+            +
+            p_correction
+        )
+
+
+        # ====================================================
+        # SPECIAL CASE:
+        # TARGET NEAR NATURAL TEMPERATURE
+        # ====================================================
+
+        if (
+            abs(
+                self.desired_temperature
+                -
+                23.0
+            )
+            <
+            0.30
+            and
+            absolute_error
+            <
+            0.30
+        ):
+
+            signed_pwm = 0.0
+
+
+        # ====================================================
+        # CLAMP
+        # ====================================================
+
+        signed_pwm = max(
+            -PWM_MAX,
+            min(
+                PWM_MAX,
+                signed_pwm
+            )
+        )
+
+
+        # ====================================================
+        # REMOVE TINY PWM
+        # ====================================================
+
+        if (
+            absolute_error
+            >
+            HOLD_ERROR
+            and
+            abs(signed_pwm)
+            <
+            MIN_EFFECTIVE_PWM
+        ):
+
+            if signed_pwm > 0:
+
+                signed_pwm = (
+                    MIN_EFFECTIVE_PWM
+                )
+
+            elif signed_pwm < 0:
+
+                signed_pwm = (
+                    -MIN_EFFECTIVE_PWM
+                )
+
+
+        # ====================================================
+        # INTEGER PWM
+        # ====================================================
+
+        signed_pwm = int(
+            round(
+                signed_pwm
+            )
+        )
+
+
+        # ====================================================
+        # DETERMINE DIRECTION
+        # ====================================================
+
+        if signed_pwm > 0:
+
+            direction = "HEAT"
+
+            pwm = signed_pwm
+
+        elif signed_pwm < 0:
+
+            direction = "COOL"
+
+            pwm = abs(
+                signed_pwm
+            )
+
+        else:
+
+            direction = "HEAT"
+
+            pwm = 0
+
+
+        # ====================================================
+        # CONTROLLER DISPLAY
+        # ====================================================
+
+        if absolute_error > NEAR_ERROR:
+
+            control_mode = "FAST"
+
+        elif absolute_error > HOLD_ERROR:
+
+            control_mode = "APPROACH"
+
+        else:
+
+            control_mode = "HOLD"
+
+
+        self.feedforward_label.setText(
+            f"FF: {feedforward_pwm:+.1f}"
+        )
+
+
+        self.error_label.setText(
+            f"Error: {error:+.2f} °C"
+        )
+
+
+        self.p_correction_label.setText(
+            f"P: {p_correction:+.1f}"
+        )
+
+
+        self.command_label.setText(
+            f"{control_mode} | "
+            f"PWM: {signed_pwm:+d}"
+        )
+
+
+        # ====================================================
+        # DON'T RESEND SAME COMMAND
+        # ====================================================
+
+        if (
+            self.last_auto_signed_pwm
+            ==
+            signed_pwm
+        ):
+
+            self.pwm_slider.setValue(
+                pwm
+            )
+
+            self.pwm_text.setText(
+                str(pwm)
+            )
+
+            return
+
+
+        # ====================================================
+        # SEND COMMAND TO ARDUINO
+        # ====================================================
+
+        command = (
+            f"SET PWM {pwm} DIR {direction}\n"
+        )
+
+
+        try:
+
+            serial_port.write(
+                command.encode("utf-8")
+            )
+
+        except serial.SerialException as error:
+
+            print(
+                f"Automatic control serial error: "
+                f"{error}"
+            )
+
+            return
+
+
+        self.last_auto_signed_pwm = (
+            signed_pwm
+        )
+
+
+        # ====================================================
+        # UPDATE GUI
+        # ====================================================
+
+        self.pwm_slider.setValue(
+            pwm
+        )
+
+        self.pwm_text.setText(
+            str(pwm)
+        )
+
+
+        # ====================================================
+        # TERMINAL OUTPUT
+        # ====================================================
+
+        print(
+            f"AUTO | "
+            f"Mode={control_mode} | "
+            f"Target={self.desired_temperature:.2f} °C | "
+            f"Temp={temperature:.2f} °C | "
+            f"Error={error:+.2f} °C | "
+            f"FF={feedforward_pwm:+.1f} | "
+            f"P={p_correction:+.1f} | "
+            f"PWM={signed_pwm:+d}"
+        )
 
 
     # ========================================================
@@ -1313,315 +1642,8 @@ class ArduinoWindow(QMainWindow):
             value
         )
 
-
         self.pwm_text.setText(
             str(value)
-        )
-
-
-    # ========================================================
-    # PROPORTIONAL CONTROLLER
-    # ========================================================
-
-    def automatic_temperature_control(
-        self,
-        temperature
-    ):
-        """
-        Calculate and send the automatic PWM.
-
-        Controller:
-
-            error = desired_temperature - temperature
-
-            u = Kp * error
-
-        Positive u:
-            HEAT
-
-        Negative u:
-            COOL
-
-        u = 0:
-            PWM 0
-        """
-
-        if not self.auto_control:
-
-            return
-
-
-        if not self.temperature_safe:
-
-            return
-
-
-        # ====================================================
-        # CALCULATE ERROR
-        # ====================================================
-
-        error = (
-            self.desired_temperature
-            -
-            temperature
-        )
-
-
-        # ====================================================
-        # DEAD BAND
-        # ====================================================
-
-        if abs(error) <= TEMPERATURE_DEADBAND:
-
-            requested_signed_pwm = 0.0
-
-            kp = 0.0
-
-            mode = "AT TARGET"
-
-
-        else:
-
-            # ------------------------------------------------
-            # HEATING
-            # ------------------------------------------------
-
-            if error > 0:
-
-                kp = KP_HEAT
-
-            # ------------------------------------------------
-            # COOLING
-            # ------------------------------------------------
-
-            else:
-
-                kp = KP_COOL
-
-
-            # ------------------------------------------------
-            # PROPORTIONAL CONTROL
-            # ------------------------------------------------
-
-            requested_signed_pwm = (
-                kp
-                *
-                error
-            )
-
-
-            mode = "HEAT" if error > 0 else "COOL"
-
-
-        # ====================================================
-        # CLAMP REQUESTED PWM
-        # ====================================================
-
-        requested_signed_pwm = max(
-            -PWM_MAX,
-            min(
-                PWM_MAX,
-                requested_signed_pwm
-            )
-        )
-
-
-        # ====================================================
-        # PWM SLEW LIMIT
-        # ====================================================
-
-        previous_pwm = (
-            self.current_signed_pwm
-        )
-
-
-        difference = (
-            requested_signed_pwm
-            -
-            previous_pwm
-        )
-
-
-        if difference > MAX_PWM_CHANGE:
-
-            commanded_signed_pwm = (
-                previous_pwm
-                +
-                MAX_PWM_CHANGE
-            )
-
-
-        elif difference < -MAX_PWM_CHANGE:
-
-            commanded_signed_pwm = (
-                previous_pwm
-                -
-                MAX_PWM_CHANGE
-            )
-
-
-        else:
-
-            commanded_signed_pwm = (
-                requested_signed_pwm
-            )
-
-
-        # ====================================================
-        # ROUND TO INTEGER
-        # ====================================================
-
-        commanded_signed_pwm = int(
-            round(
-                commanded_signed_pwm
-            )
-        )
-
-
-        # ====================================================
-        # SECOND CLAMP
-        # ====================================================
-
-        commanded_signed_pwm = max(
-            -PWM_MAX,
-            min(
-                PWM_MAX,
-                commanded_signed_pwm
-            )
-        )
-
-
-        # ====================================================
-        # DETERMINE DIRECTION
-        # ====================================================
-
-        if commanded_signed_pwm > 0:
-
-            direction = "HEAT"
-
-            pwm_magnitude = (
-                commanded_signed_pwm
-            )
-
-
-        elif commanded_signed_pwm < 0:
-
-            direction = "COOL"
-
-            pwm_magnitude = abs(
-                commanded_signed_pwm
-            )
-
-
-        else:
-
-            direction = "HEAT"
-
-            pwm_magnitude = 0
-
-
-        # ====================================================
-        # UPDATE CONTROLLER DISPLAY
-        # ====================================================
-
-        self.error_label.setText(
-            f"Error: "
-            f"{error:+.3f} °C"
-        )
-
-
-        self.kp_label.setText(
-            f"Kp: "
-            f"{kp:.1f}"
-        )
-
-
-        self.requested_pwm_label.setText(
-            f"Requested PWM: "
-            f"{requested_signed_pwm:+.1f}"
-        )
-
-
-        self.command_label.setText(
-            f"{mode} | "
-            f"Command: "
-            f"{commanded_signed_pwm:+d}"
-        )
-
-
-        # ====================================================
-        # SEND COMMAND
-        # ====================================================
-
-        command = (
-            f"SET PWM "
-            f"{pwm_magnitude} "
-            f"DIR "
-            f"{direction}\n"
-        )
-
-
-        try:
-
-            serial_port.write(
-                command.encode(
-                    "utf-8"
-                )
-            )
-
-        except serial.SerialException as error:
-
-            print(
-                f"Automatic control "
-                f"serial error: {error}"
-            )
-
-            return
-
-
-        # ====================================================
-        # SAVE CURRENT COMMAND
-        # ====================================================
-
-        self.current_signed_pwm = (
-            commanded_signed_pwm
-        )
-
-
-        # ====================================================
-        # UPDATE GUI
-        # ====================================================
-
-        self.pwm_slider.setValue(
-            pwm_magnitude
-        )
-
-
-        self.pwm_text.setText(
-            str(
-                pwm_magnitude
-            )
-        )
-
-
-        # ====================================================
-        # TERMINAL OUTPUT
-        # ====================================================
-
-        print(
-            f"AUTO | "
-            f"Target="
-            f"{self.desired_temperature:.2f} °C | "
-            f"Temp="
-            f"{temperature:.2f} °C | "
-            f"Error="
-            f"{error:+.3f} °C | "
-            f"Kp="
-            f"{kp:.1f} | "
-            f"Requested="
-            f"{requested_signed_pwm:+.1f} | "
-            f"Command="
-            f"{commanded_signed_pwm:+d}"
         )
 
 
@@ -1631,21 +1653,19 @@ class ArduinoWindow(QMainWindow):
 
     def send_command(self):
 
-        # Automatic control has priority.
-
         if self.auto_control:
 
             print(
-                "Manual PWM ignored while "
-                "AUTO CONTROL is ON."
+                "Manual PWM ignored because "
+                "automatic control is ON."
             )
 
             return
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # SAFETY
-        # ====================================================
+        # ----------------------------------------------------
 
         if not self.temperature_safe:
 
@@ -1666,9 +1686,7 @@ class ArduinoWindow(QMainWindow):
             try:
 
                 serial_port.write(
-                    command.encode(
-                        "utf-8"
-                    )
+                    command.encode("utf-8")
                 )
 
             except serial.SerialException as error:
@@ -1689,9 +1707,9 @@ class ArduinoWindow(QMainWindow):
             return
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # GET PWM
-        # ====================================================
+        # ----------------------------------------------------
 
         try:
 
@@ -1706,9 +1724,9 @@ class ArduinoWindow(QMainWindow):
             )
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # CLAMP
-        # ====================================================
+        # ----------------------------------------------------
 
         pwm = max(
             PWM_MIN,
@@ -1719,10 +1737,6 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        # ====================================================
-        # SYNCHRONIZE GUI
-        # ====================================================
-
         self.pwm_slider.setValue(
             pwm
         )
@@ -1732,50 +1746,34 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # DIRECTION
-        # ====================================================
+        # ----------------------------------------------------
 
         if self.direction_button.isChecked():
 
             direction = "HEAT"
 
-            self.current_signed_pwm = pwm
-
         else:
 
             direction = "COOL"
 
-            self.current_signed_pwm = -pwm
-
-
-        # ====================================================
-        # SEND
-        # ====================================================
 
         command = (
-            f"SET PWM "
-            f"{pwm} "
-            f"DIR "
-            f"{direction}\n"
+            f"SET PWM {pwm} DIR {direction}\n"
         )
 
 
         try:
 
             serial_port.write(
-                command.encode(
-                    "utf-8"
-                )
+                command.encode("utf-8")
             )
-
 
             print(
                 f"Sent: "
-                f"SET PWM {pwm} "
-                f"DIR {direction}"
+                f"SET PWM {pwm} DIR {direction}"
             )
-
 
         except serial.SerialException as error:
 
@@ -1792,31 +1790,25 @@ class ArduinoWindow(QMainWindow):
 
         while serial_port.in_waiting:
 
-            # =================================================
-            # READ LINE
-            # =================================================
-
             try:
 
                 raw_line = (
                     serial_port.readline()
                 )
 
-
                 line = raw_line.decode(
                     "utf-8",
                     errors="ignore"
                 ).strip()
-
 
             except Exception:
 
                 continue
 
 
-            # =================================================
+            # ------------------------------------------------
             # PARSE
-            # =================================================
+            # ------------------------------------------------
 
             result = parse_arduino_line(
                 line
@@ -1837,7 +1829,7 @@ class ArduinoWindow(QMainWindow):
 
 
             # =================================================
-            # SAFETY CHECK
+            # TEMPERATURE SAFETY
             # =================================================
 
             if (
@@ -1858,10 +1850,7 @@ class ArduinoWindow(QMainWindow):
 
                 self.temperature_safe = False
 
-
-                # Stop automatic control output.
-
-                self.current_signed_pwm = 0
+                self.last_auto_signed_pwm = None
 
 
                 if self.direction_button.isChecked():
@@ -1876,30 +1865,23 @@ class ArduinoWindow(QMainWindow):
                 try:
 
                     command = (
-                        f"SET PWM 0 "
-                        f"DIR {direction}\n"
+                        f"SET PWM 0 DIR {direction}\n"
                     )
-
 
                     serial_port.write(
-                        command.encode(
-                            "utf-8"
-                        )
+                        command.encode("utf-8")
                     )
-
 
                 except serial.SerialException as error:
 
                     print(
-                        f"Serial send error: "
-                        f"{error}"
+                        f"Serial send error: {error}"
                     )
 
 
                 self.pwm_slider.setValue(
                     0
                 )
-
 
                 self.pwm_text.setText(
                     "0"
@@ -1920,7 +1902,7 @@ class ArduinoWindow(QMainWindow):
 
 
             # =================================================
-            # AUTOMATIC CONTROL
+            # AUTOMATIC CONTROLLER
             # =================================================
 
             self.automatic_temperature_control(
@@ -1929,7 +1911,7 @@ class ArduinoWindow(QMainWindow):
 
 
             # =================================================
-            # CONVERT ARDUINO PWM TO SIGNED PWM
+            # SIGNED PWM
             # =================================================
 
             if heat_cool == 1:
@@ -1942,18 +1924,7 @@ class ArduinoWindow(QMainWindow):
 
 
             # =================================================
-            # ERROR
-            # =================================================
-
-            error = (
-                self.desired_temperature
-                -
-                temperature
-            )
-
-
-            # =================================================
-            # TERMINAL OUTPUT
+            # TERMINAL
             # =================================================
 
             print(
@@ -1963,8 +1934,6 @@ class ArduinoWindow(QMainWindow):
                 f"{time_s:.2f}, "
                 f"PWM: "
                 f"{signed_pwm:+d}, "
-                f"Error: "
-                f"{error:+.3f}, "
                 f"Heat/Cool: "
                 f"{heat_cool}"
             )
@@ -2012,12 +1981,9 @@ class ArduinoWindow(QMainWindow):
             csv_writer.writerow([
                 time_s,
                 temperature,
-                self.desired_temperature,
-                error,
                 signed_pwm,
                 heat_cool
             ])
-
 
             csv_file.flush()
 
@@ -2030,26 +1996,13 @@ class ArduinoWindow(QMainWindow):
                 time_s
             )
 
-
             self.temperatures.append(
                 temperature
             )
 
-
-            self.setpoints.append(
-                self.desired_temperature
-            )
-
-
-            self.errors.append(
-                error
-            )
-
-
             self.pwms.append(
                 signed_pwm
             )
-
 
             self.directions.append(
                 heat_cool
@@ -2084,10 +2037,6 @@ class ArduinoWindow(QMainWindow):
 
                 self.temperatures.pop(0)
 
-                self.setpoints.pop(0)
-
-                self.errors.pop(0)
-
                 self.pwms.pop(0)
 
                 self.directions.pop(0)
@@ -2116,14 +2065,11 @@ class ArduinoWindow(QMainWindow):
         # ====================================================
 
         temp_min = min(
-            min(self.temperatures),
-            min(self.setpoints)
+            self.temperatures
         )
 
-
         temp_max = max(
-            max(self.temperatures),
-            max(self.setpoints)
+            self.temperatures
         )
 
 
@@ -2134,15 +2080,15 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        if temp_range < 1.0:
+        if temp_range < 2:
 
-            temp_range = 1.0
+            temp_range = 2
 
 
         temp_padding = (
             temp_range
             *
-            0.15
+            0.10
         )
 
 
@@ -2198,7 +2144,6 @@ class ArduinoWindow(QMainWindow):
             self.pwms
         )
 
-
         pwm_max = max(
             self.pwms
         )
@@ -2237,17 +2182,7 @@ class ArduinoWindow(QMainWindow):
         )
 
 
-        # Always show zero.
-
-        if pwm_axis_min > 0:
-
-            pwm_axis_min = 0
-
-
-        if pwm_axis_max < 0:
-
-            pwm_axis_max = 0
-
+        # Keep physical limits.
 
         pwm_axis_min = max(
             -PWM_MAX,
@@ -2260,6 +2195,20 @@ class ArduinoWindow(QMainWindow):
             pwm_axis_max
         )
 
+
+        # Always show zero.
+
+        if pwm_axis_min > 0:
+
+            pwm_axis_min = 0
+
+
+        if pwm_axis_max < 0:
+
+            pwm_axis_max = 0
+
+
+        # Prevent an extremely small axis.
 
         if (
             pwm_axis_max
@@ -2280,81 +2229,25 @@ class ArduinoWindow(QMainWindow):
                 center - 5
             )
 
-
             pwm_axis_max = (
                 center + 5
             )
 
 
+        pwm_axis_min = max(
+            -PWM_MAX,
+            pwm_axis_min
+        )
+
+        pwm_axis_max = min(
+            PWM_MAX,
+            pwm_axis_max
+        )
+
+
         self.pwm_plot.setYRange(
             pwm_axis_min,
             pwm_axis_max,
-            padding=0
-        )
-
-
-        # ====================================================
-        # ERROR AUTO-ZOOM
-        # ====================================================
-
-        error_min = min(
-            self.errors
-        )
-
-
-        error_max = max(
-            self.errors
-        )
-
-
-        error_range = (
-            error_max
-            -
-            error_min
-        )
-
-
-        if error_range < 0.5:
-
-            error_range = 0.5
-
-
-        error_padding = (
-            error_range
-            *
-            0.20
-        )
-
-
-        error_axis_min = (
-            error_min
-            -
-            error_padding
-        )
-
-
-        error_axis_max = (
-            error_max
-            +
-            error_padding
-        )
-
-
-        # Always show zero.
-
-        if error_axis_min > 0:
-
-            error_axis_min = 0
-
-
-        if error_axis_max < 0:
-
-            error_axis_max = 0
-
-
-        self.error_plot.setYRange(
-            error_axis_min,
-            error_axis_max,
             padding=0
         )
 
@@ -2378,14 +2271,11 @@ class ArduinoWindow(QMainWindow):
 
             if self.directions[i] == 1:
 
-                # ------------------------------------------------
                 # HEAT
-                # ------------------------------------------------
 
                 heat_temperature.append(
                     self.temperatures[i]
                 )
-
 
                 cool_temperature.append(
                     float("nan")
@@ -2396,7 +2286,6 @@ class ArduinoWindow(QMainWindow):
                     self.pwms[i]
                 )
 
-
                 cool_pwm.append(
                     float("nan")
                 )
@@ -2404,14 +2293,11 @@ class ArduinoWindow(QMainWindow):
 
             else:
 
-                # ------------------------------------------------
                 # COOL
-                # ------------------------------------------------
 
                 heat_temperature.append(
                     float("nan")
                 )
-
 
                 cool_temperature.append(
                     self.temperatures[i]
@@ -2421,7 +2307,6 @@ class ArduinoWindow(QMainWindow):
                 heat_pwm.append(
                     float("nan")
                 )
-
 
                 cool_pwm.append(
                     self.pwms[i]
@@ -2445,15 +2330,6 @@ class ArduinoWindow(QMainWindow):
 
 
         # ====================================================
-        # SETPOINT LINE
-        # ====================================================
-
-        self.desired_temperature_line.setValue(
-            self.desired_temperature
-        )
-
-
-        # ====================================================
         # PWM CURVES
         # ====================================================
 
@@ -2466,16 +2342,6 @@ class ArduinoWindow(QMainWindow):
         self.cool_pwm_curve.setData(
             self.times,
             cool_pwm
-        )
-
-
-        # ====================================================
-        # ERROR CURVE
-        # ====================================================
-
-        self.error_curve.setData(
-            self.times,
-            self.errors
         )
 
 
@@ -2515,13 +2381,6 @@ class ArduinoWindow(QMainWindow):
 
 
             self.pwm_plot.setXRange(
-                left_edge,
-                right_edge,
-                padding=0
-            )
-
-
-            self.error_plot.setXRange(
                 left_edge,
                 right_edge,
                 padding=0

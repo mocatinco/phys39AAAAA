@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 # =========================
 # Configuration
 # =========================
-SERIAL_PORT = "COM5"       # Change to your Arduino port
+SERIAL_PORT = "COM3"    # Change to your Arduino port
 BAUD_RATE = 115200
 
 SETPOINT_C = 30.0          # Desired temperature

@@ -17,20 +17,42 @@ SET PWM 45 DIR COOL
 CONTROL ALGORITHM
 ============================================================
 
-The experimentally measured thermal equilibrium is:
+The experimentally measured thermal equilibrium is modeled as:
 
 HEATING:
-    T = 22.7673 + 0.50489 * PWM
+    T = RT + 0.50489 * PWM
 
 COOLING:
-    T = 23.1063 + 0.15280 * PWM_signed
+    T = RT + 0.15280 * PWM_signed
 
 where:
+
     PWM_signed > 0  -> HEAT
     PWM_signed < 0  -> COOL
 
-The equilibrium model is used to estimate the PWM required
-to maintain the desired temperature.
+RT is a SINGLE user-adjustable equilibrium/reference
+temperature.
+
+Previously, separate intercepts were used:
+
+    Heating: 22.7673
+    Cooling: 23.1063
+
+These were measurement uncertainty rather than two
+independent controller parameters.
+
+Therefore, this program uses ONE shared variable:
+
+    RT
+
+Default:
+
+    RT = 22.85 °C
+
+The user can change RT from the GUI.
+
+The controller first estimates the PWM required to reach
+the desired temperature at thermal equilibrium.
 
 The controller then adds a proportional correction:
 
@@ -66,6 +88,34 @@ The Arduino still receives a positive PWM magnitude:
 or:
 
     SET PWM <magnitude> DIR COOL
+
+============================================================
+THERMAL EQUILIBRIUM MODEL
+============================================================
+
+Shared intercept/reference temperature:
+
+    RT = user adjustable
+
+Heating slope:
+
+    HEAT_SLOPE = 0.50489
+
+Cooling slope:
+
+    COOL_SLOPE = 0.15280
+
+Therefore:
+
+HEATING:
+
+    T = RT + HEAT_SLOPE * PWM
+
+COOLING:
+
+    T = RT + COOL_SLOPE * PWM_signed
+
+============================================================
 """
 
 # ============================================================
@@ -103,65 +153,51 @@ DEFAULT_DESIRED_TEMP = 25.0
 # PROPORTIONAL GAIN
 # ============================================================
 
-"""
-Default proportional gain.
-
-The user can change this value from the GUI.
-
-Example:
-    KP = 3.0
-
-If the temperature is 2 °C below target:
-
-    P = 3.0 * 2
-      = 6 PWM
-
-If the temperature is 1 °C above target:
-
-    P = 3.0 * (-1)
-      = -3 PWM
-"""
-
-KP = 3.0
-
-print(f"KP = {KP}")
+DEFAULT_KP = 3.0
 
 # ============================================================
-# THERMAL EQUILIBRIUM MODEL
+# EQUILIBRIUM REFERENCE TEMPERATURE
 # ============================================================
 
 """
-Experimental steady-state measurements:
+RT is the SINGLE equilibrium-model intercept.
 
-HEATING:
-    T = 22.7673 + 0.50489 * PWM
+Previously:
 
-COOLING:
-    T = 23.1063 + 0.15280 * PWM_signed
+    HEAT_INTERCEPT = 22.7673
+    COOL_INTERCEPT = 23.1063
 
-For cooling, PWM_signed is negative.
+Those values were treated as measurement uncertainty.
 
-Therefore:
+Now both heating and cooling use the same RT.
 
-    T = 23.1063 + 0.15280 * (-PWM)
+The midpoint of approximately 22.7 and 23.0 is:
 
-or:
+    RT = 22.85 °C
 
-    T = 23.1063 - 0.15280 * PWM_magnitude
+The user can change RT from the GUI.
 """
 
-HEAT_INTERCEPT = 22.7673
+DEFAULT_RT = 22.85
+
+# ============================================================
+# THERMAL EQUILIBRIUM SLOPES
+# ============================================================
+
 HEAT_SLOPE = 0.50489
-
-COOL_INTERCEPT = 23.1063
 COOL_SLOPE = 0.15280
+
+print(f"Kp = {DEFAULT_KP}")
+print(f"RT = {DEFAULT_RT:.2f} °C")
+
 
 # ============================================================
 # EQUILIBRIUM PWM FUNCTION
 # ============================================================
 
 def calculate_equilibrium_pwm(
-    target_temperature
+    target_temperature,
+    rt
 ):
     """
     Calculate the signed PWM predicted to produce the
@@ -172,17 +208,32 @@ def calculate_equilibrium_pwm(
 
     Negative result:
         COOL
+
+    The same RT is used for both heating and cooling.
+
+    Heating:
+
+        T = RT + HEAT_SLOPE * PWM
+
+        PWM = (T - RT) / HEAT_SLOPE
+
+    Cooling:
+
+        T = RT + COOL_SLOPE * PWM_signed
+
+        PWM_signed = (T - RT) / COOL_SLOPE
     """
 
     # --------------------------------------------------------
     # HEATING SIDE
     # --------------------------------------------------------
 
-    if target_temperature >= 23.0:
+    if target_temperature >= rt:
+
         pwm = (
             target_temperature
             -
-            HEAT_INTERCEPT
+            rt
         ) / HEAT_SLOPE
 
         return pwm
@@ -194,7 +245,7 @@ def calculate_equilibrium_pwm(
     pwm = (
         target_temperature
         -
-        COOL_INTERCEPT
+        rt
     ) / COOL_SLOPE
 
     return pwm
@@ -205,7 +256,8 @@ def calculate_equilibrium_pwm(
 # ============================================================
 
 def calculate_equilibrium_temperature(
-    signed_pwm
+    signed_pwm,
+    rt
 ):
     """
     Calculate the temperature predicted by the experimental
@@ -219,8 +271,9 @@ def calculate_equilibrium_temperature(
     """
 
     if signed_pwm >= 0:
+
         return (
-            HEAT_INTERCEPT
+            rt
             +
             HEAT_SLOPE
             *
@@ -228,8 +281,9 @@ def calculate_equilibrium_temperature(
         )
 
     else:
+
         return (
-            COOL_INTERCEPT
+            rt
             +
             COOL_SLOPE
             *
@@ -244,6 +298,7 @@ def calculate_equilibrium_temperature(
 import csv
 import re
 import sys
+
 import serial
 
 from PySide6.QtCore import Qt, QTimer
@@ -280,6 +335,7 @@ def parse_arduino_line(line):
     Parse one measurement line from the Arduino.
 
     Returns:
+
         time_s
         temperature
         pwm
@@ -401,7 +457,7 @@ class ArduinoWindow(QMainWindow):
 
         self.resize(
             1150,
-            950
+            1000
         )
 
         # ====================================================
@@ -412,7 +468,13 @@ class ArduinoWindow(QMainWindow):
             DEFAULT_DESIRED_TEMP
         )
 
-        self.kp = KP
+        self.kp = DEFAULT_KP
+
+        # ----------------------------------------------------
+        # SINGLE RT VARIABLE
+        # ----------------------------------------------------
+
+        self.rt = DEFAULT_RT
 
         self.auto_control = False
 
@@ -656,6 +718,86 @@ class ArduinoWindow(QMainWindow):
         )
 
         # ====================================================
+        # RT CONTROL ROW
+        # ====================================================
+
+        rt_layout = QHBoxLayout()
+
+        rt_layout.addWidget(
+            QLabel("RT:")
+        )
+
+        self.rt_text = QLineEdit(
+            f"{self.rt:.2f}"
+        )
+
+        self.rt_text.setFixedWidth(
+            80
+        )
+
+        self.rt_text.editingFinished.connect(
+            self.set_rt
+        )
+
+        rt_layout.addWidget(
+            self.rt_text
+        )
+
+        rt_layout.addWidget(
+            QLabel("°C")
+        )
+
+        self.set_rt_button = QPushButton(
+            "Set RT"
+        )
+
+        self.set_rt_button.clicked.connect(
+            self.set_rt
+        )
+
+        rt_layout.addWidget(
+            self.set_rt_button
+        )
+
+        self.rt_status_label = QLabel(
+            f"Current RT: {self.rt:.2f} °C"
+        )
+
+        rt_layout.addWidget(
+            self.rt_status_label
+        )
+
+        rt_layout.addWidget(
+            QLabel(
+                "(Shared heating/cooling equilibrium reference)"
+            )
+        )
+
+        main_layout.addLayout(
+            rt_layout
+        )
+
+        # ====================================================
+        # MODEL INFORMATION
+        # ====================================================
+
+        model_layout = QHBoxLayout()
+
+        self.model_label = QLabel(
+            f"Model: "
+            f"HEAT T = RT + {HEAT_SLOPE:.5f}×PWM | "
+            f"COOL T = RT + {COOL_SLOPE:.5f}×PWM_signed"
+        )
+
+        model_layout.addWidget(
+            self.model_label
+        )
+
+        main_layout.addLayout(
+            model_layout
+        )
+
+        # ====================================================
         # CONTROLLER INFORMATION
         # ====================================================
 
@@ -663,6 +805,10 @@ class ArduinoWindow(QMainWindow):
 
         self.gain_label = QLabel(
             f"Kp: {self.kp:.3f}"
+        )
+
+        self.rt_controller_label = QLabel(
+            f"RT: {self.rt:.2f} °C"
         )
 
         self.equilibrium_label = QLabel(
@@ -683,6 +829,10 @@ class ArduinoWindow(QMainWindow):
 
         controller_layout.addWidget(
             self.gain_label
+        )
+
+        controller_layout.addWidget(
+            self.rt_controller_label
         )
 
         controller_layout.addWidget(
@@ -753,10 +903,6 @@ class ArduinoWindow(QMainWindow):
 
         self.temperature_plot = pg.PlotWidget()
 
-        # ----------------------------------------------------
-        # LIGHT PLOT BACKGROUND
-        # ----------------------------------------------------
-
         self.temperature_plot.setBackground(
             "white"
         )
@@ -776,10 +922,6 @@ class ArduinoWindow(QMainWindow):
             "Arduino Time",
             units="s"
         )
-
-        # ----------------------------------------------------
-        # BLACK AXES AND TEXT
-        # ----------------------------------------------------
 
         self.temperature_plot.getAxis(
             "left"
@@ -864,10 +1006,6 @@ class ArduinoWindow(QMainWindow):
 
         self.pwm_plot = pg.PlotWidget()
 
-        # ----------------------------------------------------
-        # LIGHT PLOT BACKGROUND
-        # ----------------------------------------------------
-
         self.pwm_plot.setBackground(
             "white"
         )
@@ -886,10 +1024,6 @@ class ArduinoWindow(QMainWindow):
             "Arduino Time",
             units="s"
         )
-
-        # ----------------------------------------------------
-        # BLACK AXES AND TEXT
-        # ----------------------------------------------------
 
         self.pwm_plot.getAxis(
             "left"
@@ -1090,7 +1224,7 @@ class ArduinoWindow(QMainWindow):
             return
 
         # ----------------------------------------------------
-        # Kp SAFETY / VALIDATION
+        # KP VALIDATION
         # ----------------------------------------------------
 
         if new_kp < 0:
@@ -1132,6 +1266,98 @@ class ArduinoWindow(QMainWindow):
         print(
             f"Kp set to {self.kp:.3f}"
         )
+
+    # ========================================================
+    # SET RT
+    # ========================================================
+
+    def set_rt(self):
+
+        try:
+
+            new_rt = float(
+                self.rt_text.text()
+            )
+
+        except ValueError:
+
+            print(
+                "Invalid RT value."
+            )
+
+            self.rt_text.setText(
+                f"{self.rt:.2f}"
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # RT VALIDATION
+        # ----------------------------------------------------
+
+        if new_rt < SAFE_TEMP_MIN:
+
+            print(
+                f"RT must be at least "
+                f"{SAFE_TEMP_MIN} °C."
+            )
+
+            self.rt_text.setText(
+                f"{self.rt:.2f}"
+            )
+
+            return
+
+        if new_rt > SAFE_TEMP_MAX:
+
+            print(
+                f"RT must be no greater than "
+                f"{SAFE_TEMP_MAX} °C."
+            )
+
+            self.rt_text.setText(
+                f"{self.rt:.2f}"
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # UPDATE RT
+        # ----------------------------------------------------
+
+        self.rt = new_rt
+
+        self.rt_text.setText(
+            f"{self.rt:.2f}"
+        )
+
+        self.rt_status_label.setText(
+            f"Current RT: {self.rt:.2f} °C"
+        )
+
+        self.rt_controller_label.setText(
+            f"RT: {self.rt:.2f} °C"
+        )
+
+        # ----------------------------------------------------
+        # FORCE NEW AUTO COMMAND
+        # ----------------------------------------------------
+
+        self.last_auto_signed_pwm = None
+
+        print(
+            f"RT set to {self.rt:.2f} °C"
+        )
+
+        # ----------------------------------------------------
+        # UPDATE EQUILIBRIUM DISPLAY
+        # ----------------------------------------------------
+
+        if self.auto_control:
+
+            self.equilibrium_label.setText(
+                "EQ PWM: recalculating..."
+            )
 
     # ========================================================
     # SET DESIRED TEMPERATURE
@@ -1209,7 +1435,8 @@ class ArduinoWindow(QMainWindow):
                 f"Automatic control ON | "
                 f"Target = "
                 f"{self.desired_temperature:.2f} °C | "
-                f"Kp = {self.kp:.3f}"
+                f"Kp = {self.kp:.3f} | "
+                f"RT = {self.rt:.2f} °C"
             )
 
         else:
@@ -1240,6 +1467,10 @@ class ArduinoWindow(QMainWindow):
 
             self.gain_label.setText(
                 f"Kp: {self.kp:.3f}"
+            )
+
+            self.rt_controller_label.setText(
+                f"RT: {self.rt:.2f} °C"
             )
 
             self.equilibrium_label.setText(
@@ -1285,6 +1516,8 @@ class ArduinoWindow(QMainWindow):
                 equilibrium_pwm
                 +
                 p_correction
+
+        The equilibrium calculation uses the single shared RT.
         """
 
         if not self.auto_control:
@@ -1309,7 +1542,8 @@ class ArduinoWindow(QMainWindow):
 
         equilibrium_pwm_value = (
             calculate_equilibrium_pwm(
-                self.desired_temperature
+                self.desired_temperature,
+                self.rt
             )
         )
 
@@ -1385,7 +1619,8 @@ class ArduinoWindow(QMainWindow):
 
         predicted_temperature = (
             calculate_equilibrium_temperature(
-                signed_pwm
+                signed_pwm,
+                self.rt
             )
         )
 
@@ -1397,8 +1632,16 @@ class ArduinoWindow(QMainWindow):
             f"Kp: {self.kp:.3f}"
         )
 
+        self.rt_controller_label.setText(
+            f"RT: {self.rt:.2f} °C"
+        )
+
         self.kp_status_label.setText(
             f"Current Kp: {self.kp:.3f}"
+        )
+
+        self.rt_status_label.setText(
+            f"Current RT: {self.rt:.2f} °C"
         )
 
         self.equilibrium_label.setText(
@@ -1491,6 +1734,7 @@ class ArduinoWindow(QMainWindow):
             f"Target={self.desired_temperature:.2f} °C | "
             f"Temp={temperature:.2f} °C | "
             f"Error={error:+.2f} °C | "
+            f"RT={self.rt:.2f} °C | "
             f"EQ_PWM={equilibrium_pwm_value:+.2f} | "
             f"Kp={self.kp:.3f} | "
             f"P={p_correction:+.2f} | "
@@ -1948,6 +2192,7 @@ class ArduinoWindow(QMainWindow):
         )
 
         if temp_range < 2:
+
             temp_range = 2
 
         temp_padding = (
@@ -2013,6 +2258,7 @@ class ArduinoWindow(QMainWindow):
         )
 
         if pwm_range < 10:
+
             pwm_range = 10
 
         pwm_padding = (
@@ -2046,9 +2292,11 @@ class ArduinoWindow(QMainWindow):
         # Always show zero.
 
         if pwm_axis_min > 0:
+
             pwm_axis_min = 0
 
         if pwm_axis_max < 0:
+
             pwm_axis_max = 0
 
         # Prevent an extremely small axis.

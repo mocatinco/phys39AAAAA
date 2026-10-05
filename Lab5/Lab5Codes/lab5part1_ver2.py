@@ -2,6 +2,7 @@
 Arduino Temperature + PWM Control GUI
 FIXED-GAIN P CONTROLLER
 WITH THERMAL EQUILIBRIUM ENVELOPE
+
 Python communicates with the Arduino over COM3.
 
 Arduino sends:
@@ -295,6 +296,7 @@ def parse_arduino_line(line):
         return None
 
     try:
+
         temperature = float(
             match.group(1)
         )
@@ -312,6 +314,7 @@ def parse_arduino_line(line):
         )
 
     except ValueError:
+
         return None
 
     pwm = max(
@@ -408,10 +411,6 @@ class ArduinoWindow(QMainWindow):
         self.desired_temperature = (
             DEFAULT_DESIRED_TEMP
         )
-
-        # ----------------------------------------------------
-        # USER-SELECTED KP
-        # ----------------------------------------------------
 
         self.kp = KP
 
@@ -754,6 +753,14 @@ class ArduinoWindow(QMainWindow):
 
         self.temperature_plot = pg.PlotWidget()
 
+        # ----------------------------------------------------
+        # LIGHT PLOT BACKGROUND
+        # ----------------------------------------------------
+
+        self.temperature_plot.setBackground(
+            "white"
+        )
+
         self.temperature_plot.setTitle(
             "Temperature vs Arduino Time"
         )
@@ -769,6 +776,26 @@ class ArduinoWindow(QMainWindow):
             "Arduino Time",
             units="s"
         )
+
+        # ----------------------------------------------------
+        # BLACK AXES AND TEXT
+        # ----------------------------------------------------
+
+        self.temperature_plot.getAxis(
+            "left"
+        ).setPen("black")
+
+        self.temperature_plot.getAxis(
+            "bottom"
+        ).setPen("black")
+
+        self.temperature_plot.getAxis(
+            "left"
+        ).setTextPen("black")
+
+        self.temperature_plot.getAxis(
+            "bottom"
+        ).setTextPen("black")
 
         self.temperature_plot.setYRange(
             TEMP_MIN,
@@ -837,6 +864,14 @@ class ArduinoWindow(QMainWindow):
 
         self.pwm_plot = pg.PlotWidget()
 
+        # ----------------------------------------------------
+        # LIGHT PLOT BACKGROUND
+        # ----------------------------------------------------
+
+        self.pwm_plot.setBackground(
+            "white"
+        )
+
         self.pwm_plot.setTitle(
             "Signed PWM vs Arduino Time"
         )
@@ -851,6 +886,26 @@ class ArduinoWindow(QMainWindow):
             "Arduino Time",
             units="s"
         )
+
+        # ----------------------------------------------------
+        # BLACK AXES AND TEXT
+        # ----------------------------------------------------
+
+        self.pwm_plot.getAxis(
+            "left"
+        ).setPen("black")
+
+        self.pwm_plot.getAxis(
+            "bottom"
+        ).setPen("black")
+
+        self.pwm_plot.getAxis(
+            "left"
+        ).setTextPen("black")
+
+        self.pwm_plot.getAxis(
+            "bottom"
+        ).setTextPen("black")
 
         self.pwm_plot.setYRange(
             -PWM_MAX,

@@ -8,9 +8,9 @@ PWM: 120, Heat/Cool: 1
 Python sends:
 SET PWM 120 DIR HEAT
 SET PWM 45 DIR COOL
-\============================================================
+============================================================
 CONTROL ALGORITHM
-\============================================================
+============================================================
 Simple proportional temperature controller:
   error = desired_temperature - measured_temperature
   P_correction = KP * error
@@ -28,28 +28,25 @@ There is:
   - No integral
   - No derivative
 Kp is selected by the user through the GUI.
-\============================================================
+============================================================
 SIGNED PWM
-\============================================================
+============================================================
   +PWM = HEAT
   -PWM = COOL
 The Arduino receives a positive PWM magnitude:
-  SET PWM \<magnitude> DIR HEAT
+  SET PWM <magnitude> DIR HEAT
 or:
-  SET PWM \<magnitude> DIR COOL
+  SET PWM <magnitude> DIR COOL
 """
 # ============================================================
 # IMPORTS
 # ============================================================
-import csv
-import re
-import sys
-import serial
+import csv, re, sys, serial, time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
   QApplication,
-  QHBoxLayout,
   QCheckBox,
+  QHBoxLayout,
   QLabel,
   QLineEdit,
   QMainWindow,
@@ -92,8 +89,8 @@ print(f"Ki = {DEFAULT_KI}")
 # ARDUINO MEASUREMENT PARSER
 # ============================================================
 LINE_PATTERN = re.compile(
-  r"Temperature \\(C\\):\s*([-+]?\d+(?:\\.\d+)?)"
-  r",\s*Time \\(s\\):\s*([-+]?\d+(?:\\.\d+)?)"
+  r"Temperature \(C\):\s*([-+]?\d+(?:\.\d+)?)"
+  r",\s*Time \(s\):\s*([-+]?\d+(?:\.\d+)?)"
   r",\s*PWM:\s*(\d+)"
   r",\s*Heat/Cool:\s*([01])"
 )
@@ -201,14 +198,6 @@ class ArduinoWindow(QMainWindow):
     self.integral_error = 0.0
     self.previous_time = None
     self.auto_control = False
-    self.auto_recording_active = False
-    self.auto_record_start_time = None
-    self.auto_record_elapsed = 0.0
-    self.auto_record_data = []
-    self.view_mode = "last60"
-    self.view_start = None
-    self.view_end = None
-    self.auto_stop_handled = False
     self.temperature_safe = True
     self.last_auto_signed_pwm = None
     # ====================================================
@@ -345,8 +334,15 @@ class ArduinoWindow(QMainWindow):
     target_layout.addWidget(
       self.auto_button
     )
-    self.record_from_auto_start_checkbox = QCheckBox("Record from 0; stop at 300 s")
-    target_layout.addWidget(self.record_from_auto_start_checkbox)
+    self.record_300s_checkbox = QCheckBox(
+      "Record from 0; stop at 300 s"
+    )
+    target_layout.addWidget(
+      self.record_300s_checkbox
+    )
+    # Timed recording state; inactive unless the checkbox is checked.
+    self.record_start_monotonic = None
+    self.recording_stopped = False
     main_layout.addLayout(
       target_layout
     )
@@ -546,19 +542,22 @@ class ArduinoWindow(QMainWindow):
     self.temperature_plot.addItem(
       self.desired_temperature_line
     )
+    # ====================================================
+    # PLOT TIME-RANGE CONTROLS
+    # ====================================================
     range_layout = QHBoxLayout()
     self.last_60_button = QPushButton("Last 60 seconds")
     self.last_60_button.clicked.connect(self.show_last_60_seconds)
     range_layout.addWidget(self.last_60_button)
     range_layout.addWidget(QLabel("Start time (s):"))
     self.start_time_text = QLineEdit()
-    self.start_time_text.setPlaceholderText("Start")
-    self.start_time_text.setFixedWidth(80)
+    self.start_time_text.setPlaceholderText("e.g. 100")
+    self.start_time_text.setFixedWidth(90)
     range_layout.addWidget(self.start_time_text)
     range_layout.addWidget(QLabel("End time (s):"))
     self.end_time_text = QLineEdit()
-    self.end_time_text.setPlaceholderText("End")
-    self.end_time_text.setFixedWidth(80)
+    self.end_time_text.setPlaceholderText("e.g. 160")
+    self.end_time_text.setFixedWidth(90)
     range_layout.addWidget(self.end_time_text)
     self.show_segment_button = QPushButton("Show Segment")
     self.show_segment_button.clicked.connect(self.show_time_segment)
@@ -641,6 +640,9 @@ class ArduinoWindow(QMainWindow):
     self.temperatures = []
     self.pwms = []
     self.directions = []
+    self.view_mode = "last60"
+    self.view_start = None
+    self.view_end = None
     # ====================================================
     # MAIN WINDOW
     # ====================================================
@@ -851,23 +853,26 @@ class ArduinoWindow(QMainWindow):
     self.integral_error = 0.0
     self.previous_time = None
     if self.auto_control:
-      self.auto_stop_handled = False
-      if self.record_from_auto_start_checkbox.isChecked():
+      # Restart serial polling if it was stopped by a previous timed run.
+      if not self.timer.isActive():
+        self.timer.start(UPDATE_INTERVAL_MS)
+      self.recording_stopped = False
+      if self.record_300s_checkbox.isChecked():
         self.times.clear()
         self.temperatures.clear()
         self.pwms.clear()
         self.directions.clear()
-        self.auto_record_data.clear()
-        self.auto_recording_active = True
-        self.auto_record_start_time = None
-        self.auto_record_elapsed = 0.0
-        self.view_mode = "last60"
-        self.view_start = None
-        self.view_end = None
-        self.range_status_label.setText("Recording: 0 / 300 s")
+        self.record_start_monotonic = time.monotonic()
+        csv_file.seek(0)
+        csv_file.truncate()
+        csv_writer.writerow([
+          "time_s", "temperature_C", "pwm_signed", "heat_cool"
+        ])
+        csv_file.flush()
+        self.update_plots()
+        print("Timed recording started at 0 s; limit = 300 s.")
       else:
-        self.auto_recording_active = False
-        self.auto_record_start_time = None
+        self.record_start_monotonic = None
       print(
         f"Automatic control ON | "
         f"Target = "
@@ -875,7 +880,6 @@ class ArduinoWindow(QMainWindow):
         f"Kp = {self.kp:.3f}"
       )
     else:
-      self.auto_recording_active = False
       print(
         "Automatic control OFF."
       )
@@ -1149,6 +1153,22 @@ class ArduinoWindow(QMainWindow):
   # READ SERIAL
   # ========================================================
   def read_serial(self):
+    # When enabled, stop reading Arduino serial input 300 seconds after
+    # AUTO CONTROL starts. The unchecked mode follows the original behavior.
+    if (
+      self.record_300s_checkbox.isChecked()
+      and self.auto_control
+      and self.record_start_monotonic is not None
+      and time.monotonic() - self.record_start_monotonic >= 300.0
+    ):
+      print("300 s reached; stopping serial input and automatic control.")
+      self.auto_button.setChecked(False)
+      self.auto_control_changed()
+      self.recording_stopped = True
+      self.timer.stop()
+      return
+    if self.recording_stopped:
+      return
     while serial_port.in_waiting:
       try:
         raw_line = (
@@ -1174,6 +1194,21 @@ class ArduinoWindow(QMainWindow):
         pwm,
         heat_cool
       ) = result
+      record_time_s = time_s
+      if (
+        self.record_300s_checkbox.isChecked()
+        and self.auto_control
+        and self.record_start_monotonic is not None
+      ):
+        record_time_s = time.monotonic() - self.record_start_monotonic
+        if record_time_s >= 300.0:
+          # Do not process or record measurements at or beyond the time limit.
+          print("300 s reached; stopping serial input and automatic control.")
+          self.auto_button.setChecked(False)
+          self.auto_control_changed()
+          self.recording_stopped = True
+          self.timer.stop()
+          return
       # =================================================
       # TEMPERATURE SAFETY
       # =================================================
@@ -1257,7 +1292,7 @@ class ArduinoWindow(QMainWindow):
       )
       self.time_label.setText(
         f"Time: "
-        f"{time_s:.2f} s"
+        f"{record_time_s:.2f} s"
       )
       self.live_pwm_label.setText(
         f"PWM: "
@@ -1275,7 +1310,7 @@ class ArduinoWindow(QMainWindow):
       # CSV
       # =================================================
       csv_writer.writerow([
-        time_s,
+        record_time_s,
         temperature,
         signed_pwm,
         heat_cool
@@ -1284,43 +1319,18 @@ class ArduinoWindow(QMainWindow):
       # =================================================
       # STORE DATA
       # =================================================
-      store_measurement = True
-      plot_time = time_s
-      if self.record_from_auto_start_checkbox.isChecked():
-        store_measurement = self.auto_recording_active
-        if store_measurement:
-          if self.auto_record_start_time is None:
-            self.auto_record_start_time = time_s
-          plot_time = max(0.0, time_s - self.auto_record_start_time)
-          self.auto_record_elapsed = plot_time
-          self.range_status_label.setText(f"Recording: {plot_time:.1f} / 300 s")
-      if store_measurement:
-        self.times.append(plot_time)
-        self.temperatures.append(temperature)
-        self.pwms.append(signed_pwm)
-        self.directions.append(heat_cool)
-        if self.record_from_auto_start_checkbox.isChecked():
-          self.auto_record_data.append([plot_time, temperature, signed_pwm, heat_cool])
-      if (self.record_from_auto_start_checkbox.isChecked()
-          and self.auto_recording_active and plot_time >= 300.0
-          and not self.auto_stop_handled):
-        self.auto_stop_handled = True
-        self.auto_recording_active = False
-        self.auto_control = False
-        self.auto_button.setChecked(False)
-        self.update_auto_button()
-        self.last_auto_signed_pwm = 0
-        try:
-          serial_port.write(b"SET PWM 0 DIR HEAT\n")
-        except serial.SerialException as error:
-          print(f"Serial send error while stopping at 300 s: {error}")
-        self.pwm_slider.setValue(0)
-        self.pwm_text.setText("0")
-        self.command_label.setText("Command: PWM 0 — 300 s limit reached")
-        self.range_status_label.setText("300 s complete; PWM set to 0")
-        self.save_auto_recording()
-      if not store_measurement:
-        continue
+      self.times.append(
+        record_time_s
+      )
+      self.temperatures.append(
+        temperature
+      )
+      self.pwms.append(
+        signed_pwm
+      )
+      self.directions.append(
+        heat_cool
+      )
       # =================================================
       # UPDATE PLOTS
       # =================================================
@@ -1330,81 +1340,107 @@ class ArduinoWindow(QMainWindow):
   # ========================================================
   def show_last_60_seconds(self):
     self.view_mode = "last60"
-    self.view_start = self.view_end = None
+    self.view_start = None
+    self.view_end = None
     self.range_status_label.setText("Showing last 60 seconds")
     self.update_plots()
   def show_time_segment(self):
     try:
-      start = float(self.start_time_text.text().strip())
-      end = float(self.end_time_text.text().strip())
-      if start >= end:
-        raise ValueError
-    except ValueError:
-      QMessageBox.warning(self, "Invalid time range", "Enter valid times; start must be less than end.")
+      start_time = float(self.start_time_text.text().strip())
+      end_time = float(self.end_time_text.text().strip())
+      if start_time >= end_time:
+        raise ValueError("Start time must be less than end time.")
+    except ValueError as error:
+      self.range_status_label.setText(str(error) or "Enter valid start and end times.")
       return
-    self.view_mode, self.view_start, self.view_end = "segment", start, end
-    self.range_status_label.setText(f"Showing {start:g} to {end:g} s")
+    self.view_mode = "segment"
+    self.view_start = start_time
+    self.view_end = end_time
+    self.range_status_label.setText(f"Showing {start_time:g} to {end_time:g} s")
     self.update_plots()
-  def save_auto_recording(self):
-    answer = QMessageBox.question(self, "Recording complete", "300 seconds reached and PWM is set to 0. Save the recorded data?", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-    if answer != QMessageBox.Yes:
-      return
-    filename, _ = QFileDialog.getSaveFileName(self, "Save recorded data", "auto_recording_300s.csv", "CSV files (*.csv)")
-    if not filename:
-      return
-    try:
-      with open(filename, "w", newline="", encoding="utf-8") as output:
-        writer = csv.writer(output)
-        writer.writerow(["elapsed_time_s", "temperature_C", "pwm_signed", "heat_cool"])
-        writer.writerows(self.auto_record_data)
-      QMessageBox.information(self, "Saved", f"Data saved to:\n{filename}")
-    except OSError as error:
-      QMessageBox.critical(self, "Save failed", f"Could not save data:\n{error}")
   # ========================================================
   # UPDATE PLOTS
   # ========================================================
   def update_plots(self):
     if not self.times:
       return
-    newest = self.times[-1]
+    newest_time = self.times[-1]
     if self.view_mode == "last60":
-      left = max(0.0, newest - WINDOW_SECONDS)
-      right = newest
+      left_edge = max(0, newest_time - WINDOW_SECONDS)
+      right_edge = newest_time
     else:
-      left, right = self.view_start, self.view_end
-    indices = [i for i, t in enumerate(self.times) if left <= t <= right]
-    ts = [self.times[i] for i in indices]
-    temps = [self.temperatures[i] for i in indices]
-    pwms = [self.pwms[i] for i in indices]
-    dirs = [self.directions[i] for i in indices]
-    if not ts:
-      for curve in (self.heat_temperature_curve, self.cool_temperature_curve, self.heat_pwm_curve, self.cool_pwm_curve):
-        curve.setData([], [])
-    else:
-      tmin, tmax = min(temps), max(temps)
-      pad = max(tmax - tmin, 2) * 0.1
-      self.temperature_plot.setYRange(max(TEMP_MIN, tmin-pad), min(TEMP_MAX, tmax+pad), padding=0)
-      pmin, pmax = min(pwms), max(pwms)
-      ppad = max(pmax-pmin, 10) * 0.15
-      ymin, ymax = max(-PWM_MAX, pmin-ppad), min(PWM_MAX, pmax+ppad)
-      if ymin > 0: ymin = 0
-      if ymax < 0: ymax = 0
-      if ymax-ymin < 10: ymin, ymax = max(-PWM_MAX, (ymin+ymax)/2-5), min(PWM_MAX, (ymin+ymax)/2+5)
-      self.pwm_plot.setYRange(ymin, ymax, padding=0)
-      ht, ct, hp, cp = [], [], [], []
-      for temp, pwm, direction in zip(temps, pwms, dirs):
-        ht.append(temp if direction == 1 else float("nan"))
-        ct.append(temp if direction != 1 else float("nan"))
-        hp.append(pwm if direction == 1 else float("nan"))
-        cp.append(pwm if direction != 1 else float("nan"))
-      self.heat_temperature_curve.setData(ts, ht)
-      self.cool_temperature_curve.setData(ts, ct)
-      self.heat_pwm_curve.setData(ts, hp)
-      self.cool_pwm_curve.setData(ts, cp)
-    if right <= left: right = left + 1
-    self.temperature_plot.setXRange(left, right, padding=0)
-    self.pwm_plot.setXRange(left, right, padding=0)
-
+      left_edge = self.view_start
+      right_edge = self.view_end
+    selected = [i for i, t in enumerate(self.times) if left_edge <= t <= right_edge]
+    display_times = [self.times[i] for i in selected]
+    display_temperatures = [self.temperatures[i] for i in selected]
+    display_pwms = [self.pwms[i] for i in selected]
+    display_directions = [self.directions[i] for i in selected]
+    if not display_times:
+      self.heat_temperature_curve.setData([], [])
+      self.cool_temperature_curve.setData([], [])
+      self.heat_pwm_curve.setData([], [])
+      self.cool_pwm_curve.setData([], [])
+      if right_edge <= left_edge:
+        right_edge = left_edge + 1
+      self.temperature_plot.setXRange(left_edge, right_edge, padding=0)
+      self.pwm_plot.setXRange(left_edge, right_edge, padding=0)
+      return
+    # ====================================================
+    # TEMPERATURE AUTO-ZOOM
+    # ====================================================
+    temp_min = min(display_temperatures)
+    temp_max = max(display_temperatures)
+    temp_range = max(temp_max - temp_min, 2)
+    temp_padding = temp_range * 0.10
+    temperature_axis_min = max(TEMP_MIN, temp_min - temp_padding)
+    temperature_axis_max = min(TEMP_MAX, temp_max + temp_padding)
+    if temperature_axis_max <= temperature_axis_min:
+      temperature_axis_min, temperature_axis_max = TEMP_MIN, TEMP_MAX
+    self.temperature_plot.setYRange(temperature_axis_min, temperature_axis_max, padding=0)
+    # ====================================================
+    # PWM AUTO-ZOOM
+    # ====================================================
+    pwm_min = min(display_pwms)
+    pwm_max = max(display_pwms)
+    pwm_range = max(pwm_max - pwm_min, 10)
+    pwm_padding = pwm_range * 0.15
+    pwm_axis_min = max(-PWM_MAX, pwm_min - pwm_padding)
+    pwm_axis_max = min(PWM_MAX, pwm_max + pwm_padding)
+    if pwm_axis_min > 0:
+      pwm_axis_min = 0
+    if pwm_axis_max < 0:
+      pwm_axis_max = 0
+    if pwm_axis_max - pwm_axis_min < 10:
+      center = (pwm_axis_max + pwm_axis_min) / 2
+      pwm_axis_min = max(-PWM_MAX, center - 5)
+      pwm_axis_max = min(PWM_MAX, center + 5)
+    self.pwm_plot.setYRange(pwm_axis_min, pwm_axis_max, padding=0)
+    # ====================================================
+    # SEPARATE HEAT / COOL DATA
+    # ====================================================
+    heat_temperature, cool_temperature = [], []
+    heat_pwm, cool_pwm = [], []
+    for temperature, pwm, direction in zip(display_temperatures, display_pwms, display_directions):
+      if direction == 1:
+        heat_temperature.append(temperature)
+        cool_temperature.append(float("nan"))
+        heat_pwm.append(pwm)
+        cool_pwm.append(float("nan"))
+      else:
+        heat_temperature.append(float("nan"))
+        cool_temperature.append(temperature)
+        heat_pwm.append(float("nan"))
+        cool_pwm.append(pwm)
+    self.heat_temperature_curve.setData(display_times, heat_temperature)
+    self.cool_temperature_curve.setData(display_times, cool_temperature)
+    self.heat_pwm_curve.setData(display_times, heat_pwm)
+    self.cool_pwm_curve.setData(display_times, cool_pwm)
+    # Keep the selected time window fixed while new measurements arrive.
+    if right_edge <= left_edge:
+      right_edge = left_edge + 1
+    self.temperature_plot.setXRange(left_edge, right_edge, padding=0)
+    self.pwm_plot.setXRange(left_edge, right_edge, padding=0)
   # ========================================================
   # CLOSE PROGRAM
   # ========================================================

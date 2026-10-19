@@ -532,6 +532,29 @@ class ArduinoWindow(QMainWindow):
     self.temperature_plot.addItem(
       self.desired_temperature_line
     )
+    # ====================================================
+    # PLOT TIME-RANGE CONTROLS
+    # ====================================================
+    range_layout = QHBoxLayout()
+    self.last_60_button = QPushButton("Last 60 seconds")
+    self.last_60_button.clicked.connect(self.show_last_60_seconds)
+    range_layout.addWidget(self.last_60_button)
+    range_layout.addWidget(QLabel("Start time (s):"))
+    self.start_time_text = QLineEdit()
+    self.start_time_text.setPlaceholderText("e.g. 100")
+    self.start_time_text.setFixedWidth(90)
+    range_layout.addWidget(self.start_time_text)
+    range_layout.addWidget(QLabel("End time (s):"))
+    self.end_time_text = QLineEdit()
+    self.end_time_text.setPlaceholderText("e.g. 160")
+    self.end_time_text.setFixedWidth(90)
+    range_layout.addWidget(self.end_time_text)
+    self.show_segment_button = QPushButton("Show Segment")
+    self.show_segment_button.clicked.connect(self.show_time_segment)
+    range_layout.addWidget(self.show_segment_button)
+    self.range_status_label = QLabel("Showing last 60 seconds")
+    range_layout.addWidget(self.range_status_label)
+    main_layout.addLayout(range_layout)
     main_layout.addWidget(
       self.temperature_plot
     )
@@ -607,6 +630,9 @@ class ArduinoWindow(QMainWindow):
     self.temperatures = []
     self.pwms = []
     self.directions = []
+    self.view_mode = "last60"
+    self.view_start = None
+    self.view_end = None
     # ====================================================
     # MAIN WINDOW
     # ====================================================
@@ -1245,253 +1271,115 @@ class ArduinoWindow(QMainWindow):
         heat_cool
       )
       # =================================================
-      # REMOVE OLD DATA
-      # =================================================
-      newest_time = (
-        self.times[-1]
-      )
-      oldest_allowed = (
-        newest_time
-        -
-        WINDOW_SECONDS
-      )
-      while (
-        self.times
-        and
-        self.times[0]
-        <
-        oldest_allowed
-      ):
-        self.times.pop(0)
-        self.temperatures.pop(0)
-        self.pwms.pop(0)
-        self.directions.pop(0)
-      # =================================================
       # UPDATE PLOTS
       # =================================================
       self.update_plots()
   # ========================================================
   # UPDATE PLOTS
   # ========================================================
+  def show_last_60_seconds(self):
+    self.view_mode = "last60"
+    self.view_start = None
+    self.view_end = None
+    self.range_status_label.setText("Showing last 60 seconds")
+    self.update_plots()
+  def show_time_segment(self):
+    try:
+      start_time = float(self.start_time_text.text().strip())
+      end_time = float(self.end_time_text.text().strip())
+      if start_time >= end_time:
+        raise ValueError("Start time must be less than end time.")
+    except ValueError as error:
+      self.range_status_label.setText(str(error) or "Enter valid start and end times.")
+      return
+    self.view_mode = "segment"
+    self.view_start = start_time
+    self.view_end = end_time
+    self.range_status_label.setText(f"Showing {start_time:g} to {end_time:g} s")
+    self.update_plots()
+  # ========================================================
+  # UPDATE PLOTS
+  # ========================================================
   def update_plots(self):
-    if len(self.times) == 0:
+    if not self.times:
+      return
+    newest_time = self.times[-1]
+    if self.view_mode == "last60":
+      left_edge = max(0, newest_time - WINDOW_SECONDS)
+      right_edge = newest_time
+    else:
+      left_edge = self.view_start
+      right_edge = self.view_end
+    selected = [i for i, t in enumerate(self.times) if left_edge <= t <= right_edge]
+    display_times = [self.times[i] for i in selected]
+    display_temperatures = [self.temperatures[i] for i in selected]
+    display_pwms = [self.pwms[i] for i in selected]
+    display_directions = [self.directions[i] for i in selected]
+    if not display_times:
+      self.heat_temperature_curve.setData([], [])
+      self.cool_temperature_curve.setData([], [])
+      self.heat_pwm_curve.setData([], [])
+      self.cool_pwm_curve.setData([], [])
+      if right_edge <= left_edge:
+        right_edge = left_edge + 1
+      self.temperature_plot.setXRange(left_edge, right_edge, padding=0)
+      self.pwm_plot.setXRange(left_edge, right_edge, padding=0)
       return
     # ====================================================
     # TEMPERATURE AUTO-ZOOM
     # ====================================================
-    temp_min = min(
-      self.temperatures
-    )
-    temp_max = max(
-      self.temperatures
-    )
-    temp_range = (
-      temp_max
-      -
-      temp_min
-    )
-    if temp_range < 2:
-      temp_range = 2
-    temp_padding = (
-      temp_range
-      *
-      0.10
-    )
-    temperature_axis_min = (
-      temp_min
-      -
-      temp_padding
-    )
-    temperature_axis_max = (
-      temp_max
-      +
-      temp_padding
-    )
-    temperature_axis_min = max(
-      TEMP_MIN,
-      temperature_axis_min
-    )
-    temperature_axis_max = min(
-      TEMP_MAX,
-      temperature_axis_max
-    )
-    if (
-      temperature_axis_max
-      <=
-      temperature_axis_min
-    ):
-      temperature_axis_min = TEMP_MIN
-      temperature_axis_max = TEMP_MAX
-    self.temperature_plot.setYRange(
-      temperature_axis_min,
-      temperature_axis_max,
-      padding=0
-    )
+    temp_min = min(display_temperatures)
+    temp_max = max(display_temperatures)
+    temp_range = max(temp_max - temp_min, 2)
+    temp_padding = temp_range * 0.10
+    temperature_axis_min = max(TEMP_MIN, temp_min - temp_padding)
+    temperature_axis_max = min(TEMP_MAX, temp_max + temp_padding)
+    if temperature_axis_max <= temperature_axis_min:
+      temperature_axis_min, temperature_axis_max = TEMP_MIN, TEMP_MAX
+    self.temperature_plot.setYRange(temperature_axis_min, temperature_axis_max, padding=0)
     # ====================================================
     # PWM AUTO-ZOOM
     # ====================================================
-    pwm_min = min(
-      self.pwms
-    )
-    pwm_max = max(
-      self.pwms
-    )
-    pwm_range = (
-      pwm_max
-      -
-      pwm_min
-    )
-    if pwm_range < 10:
-      pwm_range = 10
-    pwm_padding = (
-      pwm_range
-      *
-      0.15
-    )
-    pwm_axis_min = (
-      pwm_min
-      -
-      pwm_padding
-    )
-    pwm_axis_max = (
-      pwm_max
-      +
-      pwm_padding
-    )
-    pwm_axis_min = max(
-      -PWM_MAX,
-      pwm_axis_min
-    )
-    pwm_axis_max = min(
-      PWM_MAX,
-      pwm_axis_max
-    )
-    # Always show zero.
+    pwm_min = min(display_pwms)
+    pwm_max = max(display_pwms)
+    pwm_range = max(pwm_max - pwm_min, 10)
+    pwm_padding = pwm_range * 0.15
+    pwm_axis_min = max(-PWM_MAX, pwm_min - pwm_padding)
+    pwm_axis_max = min(PWM_MAX, pwm_max + pwm_padding)
     if pwm_axis_min > 0:
       pwm_axis_min = 0
     if pwm_axis_max < 0:
       pwm_axis_max = 0
-    # Prevent an extremely small axis.
-    if (
-      pwm_axis_max
-      -
-      pwm_axis_min
-      <
-      10
-    ):
-      center = (
-        pwm_axis_max
-        +
-        pwm_axis_min
-      ) / 2
-      pwm_axis_min = (
-        center - 5
-      )
-      pwm_axis_max = (
-        center + 5
-      )
-    pwm_axis_min = max(
-      -PWM_MAX,
-      pwm_axis_min
-    )
-    pwm_axis_max = min(
-      PWM_MAX,
-      pwm_axis_max
-    )
-    self.pwm_plot.setYRange(
-      pwm_axis_min,
-      pwm_axis_max,
-      padding=0
-    )
+    if pwm_axis_max - pwm_axis_min < 10:
+      center = (pwm_axis_max + pwm_axis_min) / 2
+      pwm_axis_min = max(-PWM_MAX, center - 5)
+      pwm_axis_max = min(PWM_MAX, center + 5)
+    self.pwm_plot.setYRange(pwm_axis_min, pwm_axis_max, padding=0)
     # ====================================================
     # SEPARATE HEAT / COOL DATA
     # ====================================================
-    heat_temperature = []
-    cool_temperature = []
-    heat_pwm = []
-    cool_pwm = []
-    for i in range(
-      len(self.times)
-    ):
-      if self.directions[i] == 1:
-        # HEAT
-        heat_temperature.append(
-          self.temperatures[i]
-        )
-        cool_temperature.append(
-          float("nan")
-        )
-        heat_pwm.append(
-          self.pwms[i]
-        )
-        cool_pwm.append(
-          float("nan")
-        )
+    heat_temperature, cool_temperature = [], []
+    heat_pwm, cool_pwm = [], []
+    for temperature, pwm, direction in zip(display_temperatures, display_pwms, display_directions):
+      if direction == 1:
+        heat_temperature.append(temperature)
+        cool_temperature.append(float("nan"))
+        heat_pwm.append(pwm)
+        cool_pwm.append(float("nan"))
       else:
-        # COOL
-        heat_temperature.append(
-          float("nan")
-        )
-        cool_temperature.append(
-          self.temperatures[i]
-        )
-        heat_pwm.append(
-          float("nan")
-        )
-        cool_pwm.append(
-          self.pwms[i]
-        )
-    # ====================================================
-    # TEMPERATURE CURVES
-    # ====================================================
-    self.heat_temperature_curve.setData(
-      self.times,
-      heat_temperature
-    )
-    self.cool_temperature_curve.setData(
-      self.times,
-      cool_temperature
-    )
-    # ====================================================
-    # PWM CURVES
-    # ====================================================
-    self.heat_pwm_curve.setData(
-      self.times,
-      heat_pwm
-    )
-    self.cool_pwm_curve.setData(
-      self.times,
-      cool_pwm
-    )
-    # ====================================================
-    # X AXIS
-    # ====================================================
-    if len(self.times) >= 2:
-      left_edge = max(
-        0,
-        self.times[-1]
-        -
-        WINDOW_SECONDS
-      )
-      right_edge = (
-        self.times[-1]
-      )
-      if right_edge <= left_edge:
-        right_edge = (
-          left_edge
-          +
-          1
-        )
-      self.temperature_plot.setXRange(
-        left_edge,
-        right_edge,
-        padding=0
-      )
-      self.pwm_plot.setXRange(
-        left_edge,
-        right_edge,
-        padding=0
-      )
+        heat_temperature.append(float("nan"))
+        cool_temperature.append(temperature)
+        heat_pwm.append(float("nan"))
+        cool_pwm.append(pwm)
+    self.heat_temperature_curve.setData(display_times, heat_temperature)
+    self.cool_temperature_curve.setData(display_times, cool_temperature)
+    self.heat_pwm_curve.setData(display_times, heat_pwm)
+    self.cool_pwm_curve.setData(display_times, cool_pwm)
+    # Keep the selected time window fixed while new measurements arrive.
+    if right_edge <= left_edge:
+      right_edge = left_edge + 1
+    self.temperature_plot.setXRange(left_edge, right_edge, padding=0)
+    self.pwm_plot.setXRange(left_edge, right_edge, padding=0)
   # ========================================================
   # CLOSE PROGRAM
   # ========================================================

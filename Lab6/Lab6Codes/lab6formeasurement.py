@@ -153,7 +153,8 @@ csv_writer.writerow([
   "time_s",
   "temperature_C",
   "pwm_signed",
-  "heat_cool"
+  "heat_cool",
+  "current_i"
 ])
 csv_file.flush()
 # ============================================================
@@ -866,7 +867,7 @@ class ArduinoWindow(QMainWindow):
         csv_file.seek(0)
         csv_file.truncate()
         csv_writer.writerow([
-          "time_s", "temperature_C", "pwm_signed", "heat_cool"
+          "time_s", "temperature_C", "pwm_signed", "heat_cool", "current_i"
         ])
         csv_file.flush()
         self.update_plots()
@@ -1307,13 +1308,15 @@ class ArduinoWindow(QMainWindow):
           "Direction: COOL"
         )
       # =================================================
-      # CSV
+      # CSV: record the current I contribution, not Ki itself
       # =================================================
+      current_i = self.ki * self.integral_error
       csv_writer.writerow([
         record_time_s,
         temperature,
         signed_pwm,
-        heat_cool
+        heat_cool,
+        current_i
       ])
       csv_file.flush()
       # =================================================

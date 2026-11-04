@@ -2,7 +2,7 @@
 
 Arduino Temperature + PWM Control GUI
 
-FIXED-GAIN P CONTROLLER
+PI CONTROLLER WITH SINUSOIDAL SETPOINT
 
 Python communicates with the Arduino over COM3.
 
@@ -24,7 +24,7 @@ CONTROL ALGORITHM
 
 *\\=*===========================================================
 
-Simple proportional temperature controller:
+Proportional-integral temperature controller:
 
   error = desired_temperature - measured_temperature
 
@@ -84,7 +84,7 @@ or:
 
 # ============================================================
 
-import csv, re, sys, serial, os, math
+import csv, re, sys, serial, os, math, time, json
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
@@ -118,6 +118,21 @@ import pyqtgraph as pg
 # SETTINGS
 
 # ============================================================
+
+# Global colors used by the A0-A5 live labels and graph traces.
+temperature_label_colors = [
+    "#FF0000",  # A0: red
+    "#FF8800",  # A1: orange
+    "#CCCC22",  # A2: gold
+    "#00DD44",  # A3: green
+    "#0000FF",  # A4: blue
+    "#AA22FF",  # A5: purple
+]
+
+# Calibration offsets persist beside this Python file between launches.
+CALIBRATION_FILENAME = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "temperature_calibration.json"
+)
 
 SERIAL_PORT = "COM3"
 
@@ -181,6 +196,7 @@ DATA_COLUMNS = [
     "time_s", "tec_C", "rod1_C", "rod2_C", "rod3_C",
     "rod4_C", "rod5_C", "pwm", "heat_cool", "setpoint_C", "safety"
 ]
+CSV_COLUMNS = DATA_COLUMNS + ["current_i"]
 
 
 def parse_arduino_line(line):
@@ -231,7 +247,7 @@ run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 base_name, extension = os.path.splitext(CSV_FILENAME)
 CSV_OUTPUT_FILENAME = f"{base_name}_{run_stamp}{extension or '.csv'}"
 csv_file = open(CSV_OUTPUT_FILENAME, "x", newline="", encoding="utf-8")
-csv_writer = csv.DictWriter(csv_file, fieldnames=DATA_COLUMNS)
+csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_COLUMNS)
 csv_writer.writeheader()
 csv_file.flush()
 
@@ -291,7 +307,7 @@ class ArduinoWindow(QMainWindow):
 
     self.resize(
 
-      1150,
+      1500,
 
       900
 
@@ -303,11 +319,11 @@ class ArduinoWindow(QMainWindow):
 
     # ====================================================
 
-    self.desired_temperature = (
-
-      DEFAULT_DESIRED_TEMP
-
-    )
+    self.desired_temperature = DEFAULT_DESIRED_TEMP
+    self.setpoint_mean = DEFAULT_DESIRED_TEMP
+    self.setpoint_amplitude = 0.0
+    self.setpoint_period = 60.0
+    self.setpoint_time_origin = None
 
     self.kp = DEFAULT_KP
 
@@ -329,7 +345,64 @@ class ArduinoWindow(QMainWindow):
 
     # ====================================================
 
+    root_layout = QHBoxLayout()
+    root_layout.setContentsMargins(8, 8, 8, 8)
+    root_layout.setSpacing(8)
+
+    plot_layout = QVBoxLayout()
     main_layout = QVBoxLayout()
+
+    # A 4:1 stretch ratio reserves at least 80% of the available width
+    # for the graphs. The right panel is deliberately kept compact.
+    right_panel = QWidget()
+    right_panel.setLayout(main_layout)
+    right_panel.setStyleSheet("QPushButton, QLineEdit, QLabel { font-size: 9pt; }")
+    right_panel.setMinimumWidth(250)
+    right_panel.setMaximumWidth(340)
+
+    root_layout.addLayout(plot_layout, 4)
+    root_layout.addWidget(right_panel, 1)
+    main_layout.setSpacing(3)
+
+    # Keep all legends and controls in the right-hand panel.
+    legend_heading = QLabel("GRAPH LEGENDS")
+    legend_heading.setStyleSheet("font-weight: bold; font-size: 9pt;")
+    main_layout.addWidget(legend_heading)
+
+    temperature_legend_heading = QLabel("Temperature (°C)")
+    temperature_legend_heading.setStyleSheet("font-weight: bold; font-size: 8pt;")
+    main_layout.addWidget(temperature_legend_heading)
+
+    temperature_legend_items = [
+      ("A0 (TEC)", temperature_label_colors[0]),
+      ("A1", temperature_label_colors[1]),
+      ("A2", temperature_label_colors[2]),
+      ("A3", temperature_label_colors[3]),
+      ("A4", temperature_label_colors[4]),
+      ("A5", temperature_label_colors[5]),
+      ("Tset (sinusoidal)", "green"),
+    ]
+    for legend_text, legend_color in temperature_legend_items:
+      legend_label = QLabel(f"━━  {legend_text}")
+      legend_label.setStyleSheet(
+        f"color: {legend_color}; font-weight: bold; font-size: 8pt;"
+      )
+      main_layout.addWidget(legend_label)
+
+    pwm_legend_heading = QLabel("Signed PWM")
+    pwm_legend_heading.setStyleSheet("font-weight: bold; font-size: 8pt;")
+    main_layout.addWidget(pwm_legend_heading)
+    for legend_text, legend_color in [
+      ("Heat PWM", "red"),
+      ("Cool PWM", "blue"),
+    ]:
+      legend_label = QLabel(f"━━  {legend_text}")
+      legend_label.setStyleSheet(
+        f"color: {legend_color}; font-weight: bold; font-size: 8pt;"
+      )
+      main_layout.addWidget(legend_label)
+
+    main_layout.addSpacing(3)
 
     # ====================================================
 
@@ -492,72 +565,29 @@ class ArduinoWindow(QMainWindow):
     # ====================================================
 
     target_layout = QHBoxLayout()
+    target_layout.addWidget(QLabel("Mean Ta (°C):"))
+    self.mean_temperature_text = QLineEdit(f"{self.setpoint_mean:.2f}")
+    self.mean_temperature_text.setFixedWidth(75)
+    target_layout.addWidget(self.mean_temperature_text)
 
-    target_layout.addWidget(
+    target_layout.addWidget(QLabel("Amplitude Tb (°C):"))
+    self.amplitude_temperature_text = QLineEdit(f"{self.setpoint_amplitude:.2f}")
+    self.amplitude_temperature_text.setFixedWidth(75)
+    target_layout.addWidget(self.amplitude_temperature_text)
 
-      QLabel("Desired Temperature:")
+    target_layout.addWidget(QLabel("Period P (s):"))
+    self.period_temperature_text = QLineEdit(f"{self.setpoint_period:.2f}")
+    self.period_temperature_text.setFixedWidth(75)
+    target_layout.addWidget(self.period_temperature_text)
 
-    )
-
-    self.desired_temperature_text = (
-
-      QLineEdit(
-
-        str(DEFAULT_DESIRED_TEMP)
-
-      )
-
-    )
-
-    self.desired_temperature_text.setFixedWidth(
-
-      80
-
-    )
-
-    target_layout.addWidget(
-
-      self.desired_temperature_text
-
-    )
-
-    target_layout.addWidget(
-
-      QLabel("°C")
-
-    )
-
-    self.set_temperature_button = QPushButton(
-
-      "Set Desired Temp"
-
-    )
-
-    self.set_temperature_button.clicked.connect(
-
-      self.set_desired_temperature
-
-    )
-
-    target_layout.addWidget(
-
-      self.set_temperature_button
-
-    )
+    self.set_temperature_button = QPushButton("Apply Sine Setpoint")
+    self.set_temperature_button.clicked.connect(self.set_desired_temperature)
+    target_layout.addWidget(self.set_temperature_button)
 
     self.desired_temperature_label = QLabel(
-
-      f"Target: "
-
-      f"{self.desired_temperature:.2f} °C"
-
+        f"Tset: {self.desired_temperature:.2f} °C"
     )
-
-    target_layout.addWidget(
-
-      self.desired_temperature_label
-
-    )
+    target_layout.addWidget(self.desired_temperature_label)
 
     # ----------------------------------------------------
 
@@ -590,6 +620,13 @@ class ArduinoWindow(QMainWindow):
       self.auto_button
 
     )
+
+    # Optional timed run: start recording with AUTO and stop after 300 seconds.
+    from PySide6.QtWidgets import QCheckBox
+    self.record_300s_checkbox = QCheckBox("Record from 0; stop at 300 s")
+    target_layout.addWidget(self.record_300s_checkbox)
+    self.record_start_monotonic = None
+    self.recording_stopped = False
 
     main_layout.addLayout(
 
@@ -773,6 +810,14 @@ class ArduinoWindow(QMainWindow):
     live_layout = QHBoxLayout()
     self.temperature_label = QLabel("A0 (TEC): -- °C")
     self.rod_temperature_labels = [QLabel(f"A{i}: -- °C") for i in range(1, 6)]
+
+    # Use the global sensor color array for live readouts.
+    for label, color in zip(
+      [self.temperature_label, *self.rod_temperature_labels],
+      temperature_label_colors
+    ):
+      label.setStyleSheet(f"color: {color}; font-weight: bold;")
+
     self.time_label = QLabel("Time: -- s")
     self.live_pwm_label = QLabel("PWM: --")
     self.direction_label = QLabel("Direction: --")
@@ -783,6 +828,18 @@ class ArduinoWindow(QMainWindow):
                   self.safety_label, self.line_count_label]:
       live_layout.addWidget(label)
     main_layout.addLayout(live_layout)
+
+    calibration_layout = QHBoxLayout()
+    self.calibrate_button = QPushButton("Calibrate")
+    self.calibrate_button.clicked.connect(self.calibrate_sensors)
+    calibration_layout.addWidget(self.calibrate_button)
+    self.zero_calibration_button = QPushButton("0")
+    self.zero_calibration_button.setToolTip("Reset all sensor calibration offsets to zero")
+    self.zero_calibration_button.clicked.connect(self.reset_calibration)
+    calibration_layout.addWidget(self.zero_calibration_button)
+    self.calibration_status_label = QLabel("Calibration: loading…")
+    calibration_layout.addWidget(self.calibration_status_label)
+    main_layout.addLayout(calibration_layout)
 
     # ====================================================
 
@@ -870,20 +927,20 @@ class ArduinoWindow(QMainWindow):
     # Six temperature traces. The legend maps each Arduino analog pin
     # to its fixed color; A0 is the TEC sensor used for control and safety.
     # ----------------------------------------------------
-    # Create the legend before adding curves so pyqtgraph registers each label.
-    self.temperature_plot.addLegend()
+    # Legends are displayed in the dedicated right-hand panel, not over
+    # the graph plotting area.
     self.temperature_curves = {}
     temperature_styles = [
-      ("tec_C", "A0 (TEC)", "red", 3),
-      ("rod1_C", "A1", "blue", 3),
-      ("rod2_C", "A2", "green", 3),
-      ("rod3_C", "A3", "purple", 3),
-      ("rod4_C", "A4", "orange", 3),
-      ("rod5_C", "A5", "#EEDE04", 3),
+      ("tec_C", "A0 (TEC)", temperature_label_colors[0], 3),
+      ("rod1_C", "A1", temperature_label_colors[1], 3),
+      ("rod2_C", "A2", temperature_label_colors[2], 3),
+      ("rod3_C", "A3", temperature_label_colors[3], 3),
+      ("rod4_C", "A4", temperature_label_colors[4], 3),
+      ("rod5_C", "A5", temperature_label_colors[5], 3),
     ]
     for key, label, color, width in temperature_styles:
       self.temperature_curves[key] = self.temperature_plot.plot(
-        name=label, pen=pg.mkPen(color=color, width=width)
+        pen=pg.mkPen(color=color, width=width)
       )
 
     # ----------------------------------------------------
@@ -892,32 +949,8 @@ class ArduinoWindow(QMainWindow):
 
     # ----------------------------------------------------
 
-    self.desired_temperature_line = (
-
-      pg.InfiniteLine(
-
-        pos=self.desired_temperature,
-
-        angle=0,
-
-        pen=pg.mkPen(
-
-          color="green",
-
-          width=3,
-
-          style=Qt.DashLine
-
-        )
-
-      )
-
-    )
-
-    self.temperature_plot.addItem(
-
-      self.desired_temperature_line
-
+    self.desired_temperature_curve = self.temperature_plot.plot(
+      pen=pg.mkPen(color="green", width=3, style=Qt.DashLine)
     )
 
     # ====================================================
@@ -966,7 +999,7 @@ class ArduinoWindow(QMainWindow):
 
     main_layout.addLayout(range_layout)
 
-    main_layout.addWidget(
+    plot_layout.addWidget(
 
       self.temperature_plot
 
@@ -1096,7 +1129,7 @@ class ArduinoWindow(QMainWindow):
 
     )
 
-    main_layout.addWidget(
+    plot_layout.addWidget(
 
       self.pwm_plot
 
@@ -1110,8 +1143,13 @@ class ArduinoWindow(QMainWindow):
 
     # Keep one list per CSV field used by the plots/controller.
     self.times = []
+    self.setpoints = []
     self.temperatures = []  # TEC/A0 only: PI control and safety use this list.
     self.rod_temperatures = [[] for _ in range(5)]
+    # Last five raw records, each containing A0..A5, are used for calibration.
+    self.calibration_samples = []
+    self.calibration_offsets = self.load_calibration_offsets()
+    self.update_calibration_status()
     self.pwms = []
     self.directions = []
     self.accepted_lines = 0
@@ -1133,7 +1171,7 @@ class ArduinoWindow(QMainWindow):
 
     central_widget.setLayout(
 
-      main_layout
+      root_layout
 
     )
 
@@ -1438,85 +1476,55 @@ class ArduinoWindow(QMainWindow):
   # ========================================================
 
   def set_desired_temperature(self):
-
+    """Validate and apply Ta + Tb*sin(2*pi*t/P)."""
     try:
-
-      desired_temperature = float(
-
-        self.desired_temperature_text.text()
-
-      )
-
+      mean = float(self.mean_temperature_text.text())
+      amplitude = float(self.amplitude_temperature_text.text())
+      period = float(self.period_temperature_text.text())
     except ValueError:
-
-      print(
-
-        "Invalid desired temperature."
-
-      )
-
-      self.desired_temperature_text.setText(
-
-        f"{self.desired_temperature:.2f}"
-
-      )
-
+      print("Enter numeric values for Ta, Tb, and period.")
       return
 
-    desired_temperature = max(
-
-      SAFE_TEMP_MIN,
-
-      min(
-
-        SAFE_TEMP_MAX,
-
-        desired_temperature
-
+    if not all(math.isfinite(value) for value in (mean, amplitude, period)):
+      print("Setpoint parameters must be finite numbers.")
+      return
+    if amplitude < 0 or period <= 0:
+      print("Amplitude must be >= 0 and period must be > 0.")
+      return
+    if mean - amplitude < SAFE_TEMP_MIN or mean + amplitude > SAFE_TEMP_MAX:
+      print(
+        f"The full setpoint wave must remain within "
+        f"{SAFE_TEMP_MIN} to {SAFE_TEMP_MAX} °C."
       )
+      return
 
-    )
-
-    self.desired_temperature = (
-
-      desired_temperature
-
-    )
-
-    self.desired_temperature_text.setText(
-
-      f"{desired_temperature:.2f}"
-
-    )
-
+    self.setpoint_mean = mean
+    self.setpoint_amplitude = amplitude
+    self.setpoint_period = period
+    # Start a fresh waveform phase at the latest known Arduino time.
+    self.setpoint_time_origin = self.times[-1] if self.times else None
+    self.desired_temperature = mean
+    self.mean_temperature_text.setText(f"{mean:.2f}")
+    self.amplitude_temperature_text.setText(f"{amplitude:.2f}")
+    self.period_temperature_text.setText(f"{period:.2f}")
     self.desired_temperature_label.setText(
-
-      f"Target: "
-
-      f"{desired_temperature:.2f} °C"
-
+      f"Tset: {self.desired_temperature:.2f} °C"
     )
-
-    self.desired_temperature_line.setValue(
-
-      desired_temperature
-
-    )
-
-    # ----------------------------------------------------
-
-    # FORCE NEW AUTO COMMAND
-
-    # ----------------------------------------------------
-
     self.last_auto_signed_pwm = None
-
+    self.integral_error = 0.0
+    self.previous_time = None
     print(
+      f"Sinusoidal setpoint applied: Ta={mean:.2f} °C, "
+      f"Tb={amplitude:.2f} °C, P={period:.2f} s"
+    )
 
-      f"Desired temperature set to "
-
-      f"{desired_temperature:.2f} °C"
-
+  def calculate_setpoint(self, time_s):
+    """Return Ta + Tb*sin(2*pi*t/P), with phase reset on Apply."""
+    if self.setpoint_time_origin is None:
+      self.setpoint_time_origin = time_s
+    elapsed = max(0.0, time_s - self.setpoint_time_origin)
+    return self.setpoint_mean + self.setpoint_amplitude * math.sin(
+      2.0 * math.pi * elapsed / self.setpoint_period
     )
 
   # ========================================================
@@ -1542,6 +1550,28 @@ class ArduinoWindow(QMainWindow):
     self.previous_time = None
 
     if self.auto_control:
+      if not self.timer.isActive():
+        self.timer.start(UPDATE_INTERVAL_MS)
+      # A checked timed run starts a fresh 300-second data window.
+      if self.record_300s_checkbox.isChecked():
+        self.times.clear()
+        self.setpoints.clear()
+        self.setpoint_time_origin = None
+        self.temperatures.clear()
+        for values in self.rod_temperatures:
+          values.clear()
+        self.pwms.clear()
+        self.directions.clear()
+        self.record_start_monotonic = time.monotonic()
+        self.recording_stopped = False
+        csv_file.seek(0)
+        csv_file.truncate()
+        csv_writer.writeheader()
+        csv_file.flush()
+        self.update_plots()
+        print("Timed recording started at 0 s; limit = 300 s.")
+      else:
+        self.record_start_monotonic = None
 
       print(
 
@@ -2101,8 +2131,91 @@ class ArduinoWindow(QMainWindow):
 
   # ========================================================
 
+  # ========================================================
+  # SENSOR CALIBRATION
+  # ========================================================
+
+  def load_calibration_offsets(self):
+    """Load persistent additive corrections for A0..A5, defaulting to zero."""
+    offsets = [0.0] * 6
+    try:
+      with open(CALIBRATION_FILENAME, "r", encoding="utf-8") as calibration_file:
+        saved = json.load(calibration_file)
+      values = saved.get("offsets_C", [])
+      if isinstance(values, list) and len(values) == 6:
+        parsed = [float(value) for value in values]
+        if all(math.isfinite(value) for value in parsed):
+          offsets = parsed
+    except FileNotFoundError:
+      pass
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+      print(f"Could not load calibration file: {error}")
+    return offsets
+
+  def save_calibration_offsets(self):
+    """Persist current calibration offsets beside the application script."""
+    try:
+      with open(CALIBRATION_FILENAME, "w", encoding="utf-8") as calibration_file:
+        json.dump({"offsets_C": self.calibration_offsets}, calibration_file, indent=2)
+    except OSError as error:
+      self.calibration_status_label.setText(f"Could not save calibration: {error}")
+      print(f"Could not save calibration file: {error}")
+      return False
+    return True
+
+  def update_calibration_status(self):
+    summary = ", ".join(f"A{i} {offset:+.2f}" for i, offset in enumerate(self.calibration_offsets))
+    self.calibration_status_label.setText(f"Offsets (°C): {summary}")
+
+  def calibrate_sensors(self):
+    """Align each sensor's recent five-sample mean to the mean of all 30 values."""
+    if len(self.calibration_samples) < 5:
+      self.calibration_status_label.setText(
+        f"Need 5 complete readings; have {len(self.calibration_samples)}"
+      )
+      return
+
+    means = [
+      sum(sample[index] for sample in self.calibration_samples[-5:]) / 5.0
+      for index in range(6)
+    ]
+    common_mean = sum(means) / 6.0
+    self.calibration_offsets = [common_mean - sensor_mean for sensor_mean in means]
+    if self.save_calibration_offsets():
+      self.update_calibration_status()
+      print(
+        "Sensor calibration saved. Recent five-reading means aligned to "
+        f"{common_mean:.2f} °C; offsets: "
+        + ", ".join(f"A{i} {offset:+.3f} °C" for i, offset in enumerate(self.calibration_offsets))
+      )
+
+  def reset_calibration(self):
+    """Remove all software corrections and persist zero offsets."""
+    self.calibration_offsets = [0.0] * 6
+    if self.save_calibration_offsets():
+      self.update_calibration_status()
+      print("All sensor calibration offsets reset to 0 °C.")
+
+  # ========================================================
+  # READ SERIAL
+  # ========================================================
+
   def read_serial(self):
-    """Read complete serial lines, validate DATA records, and store them."""
+    if (
+      self.record_300s_checkbox.isChecked()
+      and self.auto_control
+      and self.record_start_monotonic is not None
+      and time.monotonic() - self.record_start_monotonic >= 300.0
+    ):
+      print("300 s reached; stopping serial input and automatic control.")
+      self.auto_button.setChecked(False)
+      self.auto_control_changed()
+      self.recording_stopped = True
+      self.timer.stop()
+      return
+    if self.recording_stopped:
+      return
+
     while serial_port.in_waiting:
       try:
         raw_line = serial_port.readline()
@@ -2125,7 +2238,37 @@ class ArduinoWindow(QMainWindow):
 
       self.accepted_lines += 1
       time_s = record["time_s"]
+      record_time_s = time_s
+      if (
+        self.record_300s_checkbox.isChecked()
+        and self.auto_control
+        and self.record_start_monotonic is not None
+      ):
+        record_time_s = time.monotonic() - self.record_start_monotonic
+        if record_time_s >= 300.0:
+          print("300 s reached; stopping serial input and automatic control.")
+          self.auto_button.setChecked(False)
+          self.auto_control_changed()
+          self.recording_stopped = True
+          self.timer.stop()
+          return
+
+      # Keep the latest five uncorrected sensor records for calibration.
+      sensor_keys = ("tec_C", "rod1_C", "rod2_C", "rod3_C", "rod4_C", "rod5_C")
+      self.calibration_samples.append([record[key] for key in sensor_keys])
+      if len(self.calibration_samples) > 5:
+        self.calibration_samples.pop(0)
+
+      # Apply persisted additive offsets to all downstream temperature values.
+      # Keep the just-captured calibration sample raw so recalibration is stable.
+      for index, key in enumerate(sensor_keys):
+        record[key] += self.calibration_offsets[index]
+
       temperature = record["tec_C"]  # A0 is the only PI/safety temperature.
+      self.desired_temperature = self.calculate_setpoint(record_time_s)
+      self.desired_temperature_label.setText(
+        f"Tset: {self.desired_temperature:.2f} °C"
+      )
       pwm = record["pwm"]
       heat_cool = record["heat_cool"]
 
@@ -2159,14 +2302,15 @@ class ArduinoWindow(QMainWindow):
       self.temperature_label.setText(f"A0 (TEC): {record['tec_C']:.2f} °C")
       for index, key in enumerate(("rod1_C", "rod2_C", "rod3_C", "rod4_C", "rod5_C")):
         self.rod_temperature_labels[index].setText(f"A{index + 1}: {record[key]:.2f} °C")
-      self.time_label.setText(f"Time: {time_s:.2f} s")
+      self.time_label.setText(f"Time: {record_time_s:.2f} s")
       self.live_pwm_label.setText(f"PWM: {signed_pwm:+d}")
       self.direction_label.setText("Direction: HEAT" if heat_cool == 1 else "Direction: COOL")
       self.safety_label.setText("Safety: SAFE" if record["safety"] == 1 else "Safety: LIMIT")
       self.line_count_label.setText(f"Accepted: {self.accepted_lines} | Rejected: {self.rejected_lines}")
 
       # Store raw sensor values without calibration corrections.
-      self.times.append(time_s)
+      self.times.append(record_time_s)
+      self.setpoints.append(self.desired_temperature)
       self.temperatures.append(record["tec_C"])
       for index, key in enumerate(("rod1_C", "rod2_C", "rod3_C", "rod4_C", "rod5_C")):
         self.rod_temperatures[index].append(record[key])
@@ -2174,7 +2318,11 @@ class ArduinoWindow(QMainWindow):
       self.directions.append(heat_cool)
 
       # Write exactly the named fields, preserving raw values from Arduino.
-      csv_writer.writerow({key: record[key] for key in DATA_COLUMNS})
+      csv_row = {key: record[key] for key in DATA_COLUMNS}
+      csv_row["time_s"] = record_time_s
+      csv_row["setpoint_C"] = self.desired_temperature
+      csv_row["current_i"] = self.ki * self.integral_error
+      csv_writer.writerow(csv_row)
       csv_file.flush()  # Flush every accepted row to reduce loss on a crash.
 
       self.update_plots()
@@ -2226,7 +2374,7 @@ class ArduinoWindow(QMainWindow):
   # ========================================================
 
   def update_plots(self):
-    """Refresh all six temperature curves and the existing signed-PWM plot."""
+    """Refresh sensor temperatures, sinusoidal setpoint, and signed-PWM plot."""
     if not self.times:
       return
 
@@ -2251,6 +2399,8 @@ class ArduinoWindow(QMainWindow):
       values_by_key[key] = [self.rod_temperatures[index][i] for i in selected]
     for key in keys:
       self.temperature_curves[key].setData(display_times, values_by_key[key])
+    display_setpoints = [self.setpoints[i] for i in selected]
+    self.desired_temperature_curve.setData(display_times, display_setpoints)
 
     if display_temperatures:
       temp_min = min(min(values_by_key[key]) for key in keys)

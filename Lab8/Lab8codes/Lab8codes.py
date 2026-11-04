@@ -95,6 +95,8 @@ from PySide6.QtWidgets import (
 
   QHBoxLayout,
 
+  QGridLayout,
+
   QLabel,
 
   QLineEdit,
@@ -102,6 +104,8 @@ from PySide6.QtWidgets import (
   QMainWindow,
 
   QPushButton,
+
+  QScrollArea,
 
   QSlider,
 
@@ -123,10 +127,10 @@ import pyqtgraph as pg
 temperature_label_colors = [
     "#FF0000",  # A0: red
     "#FF8800",  # A1: orange
-    "#CCCC22",  # A2: gold
+    "#A020F0",  # A2: purple (distinct from A5 yellow)
     "#00DD44",  # A3: green
     "#0000FF",  # A4: blue
-    "#AA22FF",  # A5: purple
+    "#EEDE04",  # A5: yellow
 ]
 
 # Calibration offsets persist beside this Python file between launches.
@@ -192,29 +196,53 @@ print(f"Ki = {DEFAULT_KI}")
 
 # ============================================================
 
-DATA_COLUMNS = [
+# These columns match the current Arduino DATA output exactly. The first
+# 11 fields are also accepted for compatibility with an older Arduino sketch.
+LEGACY_DATA_COLUMNS = [
     "time_s", "tec_C", "rod1_C", "rod2_C", "rod3_C",
     "rod4_C", "rod5_C", "pwm", "heat_cool", "setpoint_C", "safety"
+]
+DATA_COLUMNS = LEGACY_DATA_COLUMNS + [
+    "room_C", "control_mode", "command_input", "raw_controller_cmd", "signed_pwm"
 ]
 CSV_COLUMNS = DATA_COLUMNS + ["current_i"]
 
 
 def parse_arduino_line(line):
-    """Parse one complete DATA record; return a dictionary or None.
+    """Parse one complete Arduino DATA record; return a dictionary or None.
 
-    Headers, acknowledgments, diagnostics, and malformed records are not data.
+    Accepts either the current 16-value format or the older 11-value format.
+    Non-DATA lines, incomplete lines, and malformed records are ignored.
     """
     line = line.strip()
     if not line.startswith("DATA,"):
         return None
 
     fields = line.split(",")
-    # DATA plus the 11 named fields must be present, with no extras.
-    if len(fields) != len(DATA_COLUMNS) + 1 or fields[0] != "DATA":
+    if not fields or fields[0] != "DATA":
+        return None
+
+    values_only = fields[1:]
+    if len(values_only) == len(LEGACY_DATA_COLUMNS):
+        values = dict(zip(LEGACY_DATA_COLUMNS, values_only))
+        try:
+            legacy_pwm = int(values["pwm"])
+            legacy_direction = int(values["heat_cool"])
+        except (ValueError, TypeError):
+            return None
+        values.update({
+            "room_C": "nan",
+            "control_mode": "",
+            "command_input": "nan",
+            "raw_controller_cmd": "nan",
+            "signed_pwm": str(legacy_pwm if legacy_direction == 1 else -legacy_pwm),
+        })
+    elif len(values_only) == len(DATA_COLUMNS):
+        values = dict(zip(DATA_COLUMNS, values_only))
+    else:
         return None
 
     try:
-        values = dict(zip(DATA_COLUMNS, fields[1:]))
         record = {
             "time_s": float(values["time_s"]),
             "tec_C": float(values["tec_C"]),
@@ -227,17 +255,27 @@ def parse_arduino_line(line):
             "heat_cool": int(values["heat_cool"]),
             "setpoint_C": float(values["setpoint_C"]),
             "safety": int(values["safety"]),
+            "room_C": float(values["room_C"]),
+            "control_mode": values["control_mode"],
+            "command_input": float(values["command_input"]),
+            "raw_controller_cmd": float(values["raw_controller_cmd"]),
+            "signed_pwm": int(values["signed_pwm"]),
         }
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, KeyError):
         return None
 
-    # Reject impossible status fields and non-finite sensor/time values.
+    # Sensor readings and Arduino time must be finite. Metadata values that
+    # have not been supplied by the Arduino are allowed to be NaN.
+    sensor_keys = ("time_s", "tec_C", "rod1_C", "rod2_C", "rod3_C", "rod4_C", "rod5_C")
+    if not all(math.isfinite(record[key]) for key in sensor_keys):
+        return None
     if record["heat_cool"] not in (0, 1) or record["safety"] not in (0, 1):
         return None
-    if not all(math.isfinite(record[key]) for key in
-               ("time_s", "tec_C", "rod1_C", "rod2_C", "rod3_C", "rod4_C", "rod5_C")):
-        return None
     if not PWM_MIN <= record["pwm"] <= PWM_MAX:
+        return None
+    if not -PWM_MAX <= record["signed_pwm"] <= PWM_MAX:
+        return None
+    if record["control_mode"] not in ("", "OPEN_LOOP", "P", "PI"):
         return None
     return record
 
@@ -245,11 +283,15 @@ def parse_arduino_line(line):
 # Make a unique filename so this run never overwrites an earlier CSV.
 run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 base_name, extension = os.path.splitext(CSV_FILENAME)
-CSV_OUTPUT_FILENAME = f"{base_name}_{run_stamp}{extension or '.csv'}"
+CSV_OUTPUT_FILENAME = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    f"{base_name}_{run_stamp}{extension or '.csv'}"
+)
 csv_file = open(CSV_OUTPUT_FILENAME, "x", newline="", encoding="utf-8")
 csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_COLUMNS)
 csv_writer.writeheader()
 csv_file.flush()
+print(f"Automatic data logging is ready: {CSV_OUTPUT_FILENAME}")
 
 # ============================================================
 
@@ -357,488 +399,228 @@ class ArduinoWindow(QMainWindow):
     right_panel = QWidget()
     right_panel.setLayout(main_layout)
     right_panel.setStyleSheet("QPushButton, QLineEdit, QLabel { font-size: 9pt; }")
-    right_panel.setMinimumWidth(250)
-    right_panel.setMaximumWidth(340)
+    right_panel.setMinimumWidth(290)
+    right_panel.setMaximumWidth(360)
+
+    # Keep the side controls usable on shorter displays; the compact panel
+    # normally fits, and scrolls only when the window height is constrained.
+    side_scroll = QScrollArea()
+    side_scroll.setWidgetResizable(True)
+    side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    side_scroll.setWidget(right_panel)
+    side_scroll.setMinimumWidth(295)
+    side_scroll.setMaximumWidth(365)
+
+    right_panel.setStyleSheet("""
+      QPushButton { padding: 4px 7px; min-height: 22px; }
+      QLineEdit { padding: 2px 4px; min-height: 20px; }
+      QCheckBox, QLabel { font-size: 8pt; }
+    """)
 
     root_layout.addLayout(plot_layout, 4)
-    root_layout.addWidget(right_panel, 1)
-    main_layout.setSpacing(3)
+    root_layout.addWidget(side_scroll, 1)
+    main_layout.setSpacing(4)
 
-    # Keep all legends and controls in the right-hand panel.
+    # Compact, two-column legend keeps the right-hand control panel short.
     legend_heading = QLabel("GRAPH LEGENDS")
     legend_heading.setStyleSheet("font-weight: bold; font-size: 9pt;")
     main_layout.addWidget(legend_heading)
 
-    temperature_legend_heading = QLabel("Temperature (°C)")
-    temperature_legend_heading.setStyleSheet("font-weight: bold; font-size: 8pt;")
-    main_layout.addWidget(temperature_legend_heading)
-
-    temperature_legend_items = [
-      ("A0 (TEC)", temperature_label_colors[0]),
-      ("A1", temperature_label_colors[1]),
-      ("A2", temperature_label_colors[2]),
-      ("A3", temperature_label_colors[3]),
-      ("A4", temperature_label_colors[4]),
-      ("A5", temperature_label_colors[5]),
-      ("Tset (sinusoidal)", "green"),
+    legend_grid = QGridLayout()
+    legend_grid.setContentsMargins(2, 0, 2, 0)
+    legend_grid.setHorizontalSpacing(8)
+    legend_grid.setVerticalSpacing(1)
+    legend_items = [
+      ("━━ A0 TEC", temperature_label_colors[0]),
+      ("━━ A1", temperature_label_colors[1]),
+      ("━━ A2", temperature_label_colors[2]),
+      ("━━ A3", temperature_label_colors[3]),
+      ("━━ A4", temperature_label_colors[4]),
+      ("━━ A5", temperature_label_colors[5]),
+      ("┄┄ Tset", "green"),
+      ("━━ Heat PWM", "red"),
+      ("━━ Cool PWM", "blue"),
     ]
-    for legend_text, legend_color in temperature_legend_items:
-      legend_label = QLabel(f"━━  {legend_text}")
+    for index, (legend_text, legend_color) in enumerate(legend_items):
+      legend_label = QLabel(legend_text)
       legend_label.setStyleSheet(
         f"color: {legend_color}; font-weight: bold; font-size: 8pt;"
       )
-      main_layout.addWidget(legend_label)
+      legend_grid.addWidget(legend_label, index // 3, index % 3)
+    main_layout.addLayout(legend_grid)
+    main_layout.addSpacing(4)
 
-    pwm_legend_heading = QLabel("Signed PWM")
-    pwm_legend_heading.setStyleSheet("font-weight: bold; font-size: 8pt;")
-    main_layout.addWidget(pwm_legend_heading)
-    for legend_text, legend_color in [
-      ("Heat PWM", "red"),
-      ("Cool PWM", "blue"),
-    ]:
-      legend_label = QLabel(f"━━  {legend_text}")
-      legend_label.setStyleSheet(
-        f"color: {legend_color}; font-weight: bold; font-size: 8pt;"
-      )
-      main_layout.addWidget(legend_label)
-
-    main_layout.addSpacing(3)
-
-    # ====================================================
-
-    # MANUAL CONTROL ROW
-
-    # ====================================================
-
-    control_layout = QHBoxLayout()
-
-    control_layout.addWidget(
-
-      QLabel("Direction:")
-
-    )
-
-    self.direction_button = QPushButton(
-
-      "HEAT"
-
-    )
-
-    self.direction_button.setCheckable(
-
-      True
-
-    )
-
-    self.direction_button.setChecked(
-
-      True
-
-    )
-
+    # MANUAL PWM CONTROLS: direction/send on one row, with a full-width
+    # slider beneath it so the slider is as long as the legend section.
+    direction_layout = QHBoxLayout()
+    direction_layout.setSpacing(5)
+    direction_layout.addWidget(QLabel("Direction:"))
+    self.direction_button = QPushButton("HEAT")
+    self.direction_button.setCheckable(True)
+    self.direction_button.setChecked(True)
     self.update_direction_button()
-
-    self.direction_button.clicked.connect(
-
-      self.direction_changed
-
-    )
-
-    control_layout.addWidget(
-
-      self.direction_button
-
-    )
-
-    # ----------------------------------------------------
-
-    # PWM SLIDER
-
-    # ----------------------------------------------------
-
-    control_layout.addWidget(
-
-      QLabel("PWM:")
-
-    )
-
-    self.pwm_slider = QSlider(
-
-      Qt.Horizontal
-
-    )
-
-    self.pwm_slider.setMinimum(
-
-      PWM_MIN
-
-    )
-
-    self.pwm_slider.setMaximum(
-
-      PWM_MAX
-
-    )
-
-    self.pwm_slider.setValue(
-
-      0
-
-    )
-
-    self.pwm_slider.valueChanged.connect(
-
-      self.slider_changed
-
-    )
-
-    control_layout.addWidget(
-
-      self.pwm_slider
-
-    )
-
-    # ----------------------------------------------------
-
-    # PWM TEXT
-
-    # ----------------------------------------------------
-
-    self.pwm_text = QLineEdit(
-
-      "0"
-
-    )
-
-    self.pwm_text.setFixedWidth(
-
-      60
-
-    )
-
-    self.pwm_text.editingFinished.connect(
-
-      self.text_pwm_changed
-
-    )
-
-    control_layout.addWidget(
-
-      self.pwm_text
-
-    )
-
-    # ----------------------------------------------------
-
-    # SEND
-
-    # ----------------------------------------------------
-
-    self.send_button = QPushButton(
-
-      "Send"
-
-    )
-
-    self.send_button.clicked.connect(
-
-      self.send_command
-
-    )
-
-    control_layout.addWidget(
-
-      self.send_button
-
-    )
-
-    main_layout.addLayout(
-
-      control_layout
-
-    )
-
-    # ====================================================
-
-    # TEMPERATURE CONTROL ROW
-
-    # ====================================================
-
-    target_layout = QHBoxLayout()
-    target_layout.addWidget(QLabel("Mean Ta (°C):"))
+    self.direction_button.clicked.connect(self.direction_changed)
+    direction_layout.addWidget(self.direction_button)
+    direction_layout.addStretch(1)
+    self.send_button = QPushButton("Send PWM")
+    self.send_button.clicked.connect(self.send_command)
+    direction_layout.addWidget(self.send_button)
+    main_layout.addLayout(direction_layout)
+
+    pwm_layout = QHBoxLayout()
+    pwm_layout.setSpacing(5)
+    pwm_layout.addWidget(QLabel("PWM"))
+    self.pwm_slider = QSlider(Qt.Horizontal)
+    self.pwm_slider.setMinimum(PWM_MIN)
+    self.pwm_slider.setMaximum(PWM_MAX)
+    self.pwm_slider.setValue(0)
+    self.pwm_slider.setMinimumWidth(100)
+    self.pwm_slider.valueChanged.connect(self.slider_changed)
+    pwm_layout.addWidget(self.pwm_slider, 1)
+    self.pwm_text = QLineEdit("0")
+    self.pwm_text.setFixedWidth(48)
+    self.pwm_text.editingFinished.connect(self.text_pwm_changed)
+    pwm_layout.addWidget(self.pwm_text)
+    main_layout.addLayout(pwm_layout)
+
+    # Setpoint controls are arranged in a compact grid rather than one
+    # very wide row that gets clipped in the side panel.
+    setpoint_heading = QLabel("SINUSOIDAL SETPOINT")
+    setpoint_heading.setStyleSheet("font-weight: bold; font-size: 9pt;")
+    main_layout.addWidget(setpoint_heading)
+    setpoint_grid = QGridLayout()
+    setpoint_grid.setContentsMargins(0, 0, 0, 0)
+    setpoint_grid.setHorizontalSpacing(6)
+    setpoint_grid.setVerticalSpacing(3)
+    setpoint_grid.setColumnStretch(0, 1)
+    setpoint_grid.setColumnStretch(1, 0)
+    setpoint_grid.addWidget(QLabel("Mean Ta (°C)"), 0, 0)
     self.mean_temperature_text = QLineEdit(f"{self.setpoint_mean:.2f}")
-    self.mean_temperature_text.setFixedWidth(75)
-    target_layout.addWidget(self.mean_temperature_text)
-
-    target_layout.addWidget(QLabel("Amplitude Tb (°C):"))
+    self.mean_temperature_text.setFixedWidth(82)
+    setpoint_grid.addWidget(self.mean_temperature_text, 0, 1)
+    setpoint_grid.addWidget(QLabel("Amplitude Tb (°C)"), 1, 0)
     self.amplitude_temperature_text = QLineEdit(f"{self.setpoint_amplitude:.2f}")
-    self.amplitude_temperature_text.setFixedWidth(75)
-    target_layout.addWidget(self.amplitude_temperature_text)
-
-    target_layout.addWidget(QLabel("Period P (s):"))
+    self.amplitude_temperature_text.setFixedWidth(82)
+    setpoint_grid.addWidget(self.amplitude_temperature_text, 1, 1)
+    setpoint_grid.addWidget(QLabel("Period P (s)"), 2, 0)
     self.period_temperature_text = QLineEdit(f"{self.setpoint_period:.2f}")
-    self.period_temperature_text.setFixedWidth(75)
-    target_layout.addWidget(self.period_temperature_text)
-
-    self.set_temperature_button = QPushButton("Apply Sine Setpoint")
+    self.period_temperature_text.setFixedWidth(82)
+    setpoint_grid.addWidget(self.period_temperature_text, 2, 1)
+    self.set_temperature_button = QPushButton("Apply Setpoint")
     self.set_temperature_button.clicked.connect(self.set_desired_temperature)
-    target_layout.addWidget(self.set_temperature_button)
-
+    setpoint_grid.addWidget(self.set_temperature_button, 3, 0, 1, 2)
+    main_layout.addLayout(setpoint_grid)
     self.desired_temperature_label = QLabel(
-        f"Tset: {self.desired_temperature:.2f} °C"
+      f"Current Tset: {self.desired_temperature:.2f} °C"
     )
-    target_layout.addWidget(self.desired_temperature_label)
+    self.desired_temperature_label.setWordWrap(True)
+    self.desired_temperature_label.setMinimumHeight(24)
+    self.desired_temperature_label.setStyleSheet("font-weight: bold; padding: 2px;")
+    main_layout.addWidget(self.desired_temperature_label)
 
-    # ----------------------------------------------------
-
-    # AUTO CONTROL
-
-    # ----------------------------------------------------
-
-    self.auto_button = QPushButton(
-
-      "AUTO CONTROL OFF"
-
-    )
-
-    self.auto_button.setCheckable(
-
-      True
-
-    )
-
-    self.auto_button.clicked.connect(
-
-      self.auto_control_changed
-
-    )
-
+    self.auto_button = QPushButton("AUTO CONTROL OFF")
+    self.auto_button.setCheckable(True)
+    self.auto_button.clicked.connect(self.auto_control_changed)
     self.update_auto_button()
+    main_layout.addWidget(self.auto_button)
 
-    target_layout.addWidget(
-
-      self.auto_button
-
-    )
-
-    # Optional timed run: start recording with AUTO and stop after 300 seconds.
     from PySide6.QtWidgets import QCheckBox
     self.record_300s_checkbox = QCheckBox("Record from 0; stop at 300 s")
-    target_layout.addWidget(self.record_300s_checkbox)
+    main_layout.addWidget(self.record_300s_checkbox)
     self.record_start_monotonic = None
     self.recording_stopped = False
 
-    main_layout.addLayout(
-
-      target_layout
-
-    )
-
-    # ====================================================
-
-    # KP CONTROL ROW
-
-    # ====================================================
-
+    # Compact gain controls; retain the editable values and status labels.
     kp_layout = QHBoxLayout()
-
-    kp_layout.addWidget(
-
-      QLabel("Kp:")
-
-    )
-
-    self.kp_text = QLineEdit(
-
-      f"{self.kp:.3f}"
-
-    )
-
-    self.kp_text.setFixedWidth(
-
-      80
-
-    )
-
-    self.kp_text.editingFinished.connect(
-
-      self.set_kp
-
-    )
-
-    kp_layout.addWidget(
-
-      self.kp_text
-
-    )
-
-    self.set_kp_button = QPushButton(
-
-      "Set Kp"
-
-    )
-
-    self.set_kp_button.clicked.connect(
-
-      self.set_kp
-
-    )
-
-    kp_layout.addWidget(
-
-      self.set_kp_button
-
-    )
-
-    self.kp_status_label = QLabel(
-
-      f"Current Kp: {self.kp:.3f}"
-
-    )
-
-    kp_layout.addWidget(
-
-      self.kp_status_label
-
-    )
-
-    main_layout.addLayout(
-
-      kp_layout
-
-    )
-
-    # ============================================================
-
-    # KI CONTROL ROW
-
-    # ============================================================
+    kp_layout.setSpacing(4)
+    kp_layout.addWidget(QLabel("Kp:"))
+    self.kp_text = QLineEdit(f"{self.kp:.3f}")
+    self.kp_text.setFixedWidth(62)
+    self.kp_text.editingFinished.connect(self.set_kp)
+    kp_layout.addWidget(self.kp_text)
+    self.set_kp_button = QPushButton("Set")
+    self.set_kp_button.clicked.connect(self.set_kp)
+    kp_layout.addWidget(self.set_kp_button)
+    self.kp_status_label = QLabel(f"Current: {self.kp:.3f}")
+    kp_layout.addWidget(self.kp_status_label, 1)
+    main_layout.addLayout(kp_layout)
 
     ki_layout = QHBoxLayout()
-
+    ki_layout.setSpacing(4)
     ki_layout.addWidget(QLabel("Ki:"))
-
     self.ki_text = QLineEdit(f"{self.ki:.3f}")
-
-    self.ki_text.setFixedWidth(80)
-
+    self.ki_text.setFixedWidth(62)
     self.ki_text.editingFinished.connect(self.set_ki)
-
     ki_layout.addWidget(self.ki_text)
-
-    self.set_ki_button = QPushButton("Set Ki")
-
+    self.set_ki_button = QPushButton("Set")
     self.set_ki_button.clicked.connect(self.set_ki)
-
     ki_layout.addWidget(self.set_ki_button)
-
-    self.ki_status_label = QLabel(
-
-      f"Current Ki: {self.ki:.3f}"
-
-    )
-
-    ki_layout.addWidget(self.ki_status_label)
-
+    self.ki_status_label = QLabel(f"Current: {self.ki:.3f}")
+    ki_layout.addWidget(self.ki_status_label, 1)
     main_layout.addLayout(ki_layout)
 
-    # ====================================================
-
-    # CONTROLLER INFORMATION
-
-    # ====================================================
-
-    controller_layout = QHBoxLayout()
-
-    self.gain_label = QLabel(
-
-      f"Kp: {self.kp:.3f}"
-
+    # Reset the accumulated integral error without changing Kp, Ki, or setpoint.
+    self.reset_integral_button = QPushButton("Reset Integral Memory")
+    self.reset_integral_button.setToolTip(
+      "Set the PI controller's accumulated integral error to zero. "
+      "The proportional term and current setpoint are unchanged."
     )
+    self.reset_integral_button.clicked.connect(self.reset_integral_term)
+    main_layout.addWidget(self.reset_integral_button)
 
-    self.error_label = QLabel(
+    # Controller state uses a two-column layout to avoid horizontal clipping.
+    controller_grid = QGridLayout()
+    controller_grid.setContentsMargins(0, 0, 0, 0)
+    controller_grid.setHorizontalSpacing(6)
+    controller_grid.setVerticalSpacing(1)
+    self.gain_label = QLabel(f"Kp: {self.kp:.3f}")
+    self.error_label = QLabel("Error: --")
+    self.p_correction_label = QLabel("P: --")
+    self.command_label = QLabel("Command: --")
+    for i, label in enumerate([
+      self.gain_label, self.error_label,
+      self.p_correction_label, self.command_label
+    ]):
+      label.setWordWrap(True)
+      controller_grid.addWidget(label, i // 2, i % 2)
+    main_layout.addLayout(controller_grid)
 
-      "Error: --"
-
-    )
-
-    self.p_correction_label = QLabel(
-
-      "P: --"
-
-    )
-
-    self.command_label = QLabel(
-
-      "Command: --"
-
-    )
-
-    controller_layout.addWidget(
-
-      self.gain_label
-
-    )
-
-    controller_layout.addWidget(
-
-      self.error_label
-
-    )
-
-    controller_layout.addWidget(
-
-      self.p_correction_label
-
-    )
-
-    controller_layout.addWidget(
-
-      self.command_label
-
-    )
-
-    main_layout.addLayout(
-
-      controller_layout
-
-    )
-
-    # ====================================================
-    # LIVE DATA: show each thermistor and serial-line counters.
-    # ====================================================
-    live_layout = QHBoxLayout()
+    # Live readouts are shown in two columns so all six sensors remain visible.
+    live_grid = QGridLayout()
+    live_grid.setContentsMargins(0, 0, 0, 0)
+    live_grid.setHorizontalSpacing(8)
+    live_grid.setVerticalSpacing(1)
     self.temperature_label = QLabel("A0 (TEC): -- °C")
     self.rod_temperature_labels = [QLabel(f"A{i}: -- °C") for i in range(1, 6)]
-
-    # Use the global sensor color array for live readouts.
     for label, color in zip(
       [self.temperature_label, *self.rod_temperature_labels],
       temperature_label_colors
     ):
       label.setStyleSheet(f"color: {color}; font-weight: bold;")
-
     self.time_label = QLabel("Time: -- s")
     self.live_pwm_label = QLabel("PWM: --")
     self.direction_label = QLabel("Direction: --")
     self.safety_label = QLabel("Safety: --")
     self.line_count_label = QLabel("Accepted: 0 | Rejected: 0")
-    for label in [self.temperature_label, *self.rod_temperature_labels,
+    live_items = [self.temperature_label, *self.rod_temperature_labels,
                   self.time_label, self.live_pwm_label, self.direction_label,
-                  self.safety_label, self.line_count_label]:
-      live_layout.addWidget(label)
-    main_layout.addLayout(live_layout)
+                  self.safety_label, self.line_count_label]
+    for index, label in enumerate(live_items):
+      live_grid.addWidget(label, index // 2, index % 2)
+    main_layout.addLayout(live_grid)
 
     calibration_layout = QHBoxLayout()
+    calibration_layout.setSpacing(4)
     self.calibrate_button = QPushButton("Calibrate")
     self.calibrate_button.clicked.connect(self.calibrate_sensors)
     calibration_layout.addWidget(self.calibrate_button)
-    self.zero_calibration_button = QPushButton("0")
+    self.zero_calibration_button = QPushButton("Reset")
     self.zero_calibration_button.setToolTip("Reset all sensor calibration offsets to zero")
     self.zero_calibration_button.clicked.connect(self.reset_calibration)
     calibration_layout.addWidget(self.zero_calibration_button)
     self.calibration_status_label = QLabel("Calibration: loading…")
-    calibration_layout.addWidget(self.calibration_status_label)
+    self.calibration_status_label.setWordWrap(True)
+    calibration_layout.addWidget(self.calibration_status_label, 1)
     main_layout.addLayout(calibration_layout)
 
     # ====================================================
@@ -952,52 +734,6 @@ class ArduinoWindow(QMainWindow):
     self.desired_temperature_curve = self.temperature_plot.plot(
       pen=pg.mkPen(color="green", width=3, style=Qt.DashLine)
     )
-
-    # ====================================================
-
-    # PLOT TIME-RANGE CONTROLS
-
-    # ====================================================
-
-    range_layout = QHBoxLayout()
-
-    self.last_60_button = QPushButton("Last 60 seconds")
-
-    self.last_60_button.clicked.connect(self.show_last_60_seconds)
-
-    range_layout.addWidget(self.last_60_button)
-
-    range_layout.addWidget(QLabel("Start time (s):"))
-
-    self.start_time_text = QLineEdit()
-
-    self.start_time_text.setPlaceholderText("e.g. 100")
-
-    self.start_time_text.setFixedWidth(90)
-
-    range_layout.addWidget(self.start_time_text)
-
-    range_layout.addWidget(QLabel("End time (s):"))
-
-    self.end_time_text = QLineEdit()
-
-    self.end_time_text.setPlaceholderText("e.g. 160")
-
-    self.end_time_text.setFixedWidth(90)
-
-    range_layout.addWidget(self.end_time_text)
-
-    self.show_segment_button = QPushButton("Show Segment")
-
-    self.show_segment_button.clicked.connect(self.show_time_segment)
-
-    range_layout.addWidget(self.show_segment_button)
-
-    self.range_status_label = QLabel("Showing last 60 seconds")
-
-    range_layout.addWidget(self.range_status_label)
-
-    main_layout.addLayout(range_layout)
 
     plot_layout.addWidget(
 
@@ -1136,6 +872,70 @@ class ArduinoWindow(QMainWindow):
     )
 
     # ====================================================
+    # TIME-AXIS / VISIBLE-DATA CONTROLS
+    # These controls sit below the graphs, where they have enough
+    # horizontal space and do not crowd the right-hand control panel.
+    # ====================================================
+    range_controls = QWidget()
+    range_controls_layout = QVBoxLayout(range_controls)
+    range_controls_layout.setContentsMargins(4, 2, 4, 2)
+    range_controls_layout.setSpacing(5)
+
+    range_button_row = QHBoxLayout()
+    range_button_row.setSpacing(8)
+    self.last_60_button = QPushButton("Last 60 seconds")
+    self.last_60_button.setMinimumWidth(130)
+    self.last_60_button.setMinimumHeight(30)
+    self.last_60_button.clicked.connect(self.show_last_60_seconds)
+    range_button_row.addWidget(self.last_60_button)
+
+    self.fit_all_button = QPushButton("Fit All Data")
+    self.fit_all_button.setMinimumWidth(130)
+    self.fit_all_button.setMinimumHeight(30)
+    self.fit_all_button.setToolTip(
+      "Automatically scale both graphs to show every recorded data point"
+    )
+    self.fit_all_button.clicked.connect(self.show_all_data)
+    range_button_row.addWidget(self.fit_all_button)
+    range_button_row.addStretch(1)
+    range_controls_layout.addLayout(range_button_row)
+
+    range_entry_row = QHBoxLayout()
+    range_entry_row.setSpacing(7)
+    range_entry_row.addWidget(QLabel("Start time (s)"))
+    self.start_time_text = QLineEdit()
+    self.start_time_text.setPlaceholderText("e.g. 100")
+    self.start_time_text.setFixedWidth(105)
+    self.start_time_text.setMinimumHeight(28)
+    range_entry_row.addWidget(self.start_time_text)
+
+    range_entry_row.addWidget(QLabel("End time (s)"))
+    self.end_time_text = QLineEdit()
+    self.end_time_text.setPlaceholderText("e.g. 160")
+    self.end_time_text.setFixedWidth(105)
+    self.end_time_text.setMinimumHeight(28)
+    range_entry_row.addWidget(self.end_time_text)
+
+    self.show_segment_button = QPushButton("Show Segment")
+    self.show_segment_button.setMinimumWidth(125)
+    self.show_segment_button.setMinimumHeight(30)
+    self.show_segment_button.setToolTip(
+      "Display data between the entered start and end times"
+    )
+    self.show_segment_button.clicked.connect(self.show_time_segment)
+    range_entry_row.addWidget(self.show_segment_button)
+    range_entry_row.addStretch(1)
+    range_controls_layout.addLayout(range_entry_row)
+
+    self.range_status_label = QLabel("Showing last 60 seconds")
+    self.range_status_label.setStyleSheet("color: #444; font-size: 9pt;")
+    range_controls_layout.addWidget(self.range_status_label)
+    range_controls.setStyleSheet(
+      "QPushButton { padding: 4px 10px; } QLineEdit { padding: 3px 5px; }"
+    )
+    plot_layout.addWidget(range_controls)
+
+    # ====================================================
 
     # DATA ARRAYS
 
@@ -1154,6 +954,8 @@ class ArduinoWindow(QMainWindow):
     self.directions = []
     self.accepted_lines = 0
     self.rejected_lines = 0
+    # Keep partial serial bytes until a complete newline-terminated DATA line arrives.
+    self.serial_buffer = bytearray()
 
     self.view_mode = "last60"
 
@@ -1508,7 +1310,7 @@ class ArduinoWindow(QMainWindow):
     self.amplitude_temperature_text.setText(f"{amplitude:.2f}")
     self.period_temperature_text.setText(f"{period:.2f}")
     self.desired_temperature_label.setText(
-      f"Tset: {self.desired_temperature:.2f} °C"
+      f"Current Tset: {self.desired_temperature:.2f} °C"
     )
     self.last_auto_signed_pwm = None
     self.integral_error = 0.0
@@ -1517,6 +1319,14 @@ class ArduinoWindow(QMainWindow):
       f"Sinusoidal setpoint applied: Ta={mean:.2f} °C, "
       f"Tb={amplitude:.2f} °C, P={period:.2f} s"
     )
+
+  def reset_integral_term(self):
+    """Clear accumulated PI integral error while leaving other settings intact."""
+    self.integral_error = 0.0
+    self.previous_time = None
+    # Ensure the next AUTO update sends a fresh command using I = 0.
+    self.last_auto_signed_pwm = None
+    print("PI integral memory reset to zero.")
 
   def calculate_setpoint(self, time_s):
     """Return Ta + Tb*sin(2*pi*t/P), with phase reset on Apply."""
@@ -1562,6 +1372,11 @@ class ArduinoWindow(QMainWindow):
           values.clear()
         self.pwms.clear()
         self.directions.clear()
+        self.calibration_samples.clear()
+        self.accepted_lines = 0
+        self.rejected_lines = 0
+        self.serial_buffer.clear()
+        self.line_count_label.setText("Accepted: 0 | Rejected: 0")
         self.record_start_monotonic = time.monotonic()
         self.recording_stopped = False
         csv_file.seek(0)
@@ -2216,18 +2031,25 @@ class ArduinoWindow(QMainWindow):
     if self.recording_stopped:
       return
 
-    while serial_port.in_waiting:
-      try:
-        raw_line = serial_port.readline()
-        line = raw_line.decode("utf-8", errors="ignore").strip()
-      except Exception:
-        self.rejected_lines += 1
-        continue
+    # Read whatever bytes have arrived, but do not parse until a full line
+    # ending in '\n' is available. At 9600 baud, a DATA line can take longer
+    # than the serial port's 0.05 s timeout to arrive in its entirety.
+    try:
+      waiting = serial_port.in_waiting
+      if waiting:
+        self.serial_buffer.extend(serial_port.read(waiting))
+    except serial.SerialException as error:
+      print(f"Serial read error: {error}")
+      return
+
+    while b"\n" in self.serial_buffer:
+      raw_line, _, remainder = self.serial_buffer.partition(b"\n")
+      self.serial_buffer = bytearray(remainder)
+      line = raw_line.decode("utf-8", errors="ignore").strip()
       if not line:
         continue
 
-      # Only parse DATA records. Headers and diagnostics are ignored by the
-      # parser; every nonempty line that is not a valid record counts rejected.
+      # The Arduino startup header and any diagnostics are not DATA records.
       record = parse_arduino_line(line)
       if record is None:
         self.rejected_lines += 1
@@ -2237,6 +2059,7 @@ class ArduinoWindow(QMainWindow):
         continue
 
       self.accepted_lines += 1
+      raw_record = record.copy()  # Keep uncalibrated Arduino values for the CSV.
       time_s = record["time_s"]
       record_time_s = time_s
       if (
@@ -2317,10 +2140,13 @@ class ArduinoWindow(QMainWindow):
       self.pwms.append(signed_pwm)
       self.directions.append(heat_cool)
 
-      # Write exactly the named fields, preserving raw values from Arduino.
-      csv_row = {key: record[key] for key in DATA_COLUMNS}
+      # Save uncalibrated Arduino sensor readings and all transmitted metadata.
+      # setpoint_C is the Python waveform setpoint because the Arduino currently
+      # transmits NaN for that field; current_i is calculated by the Python PI.
+      csv_row = {key: raw_record[key] for key in DATA_COLUMNS}
       csv_row["time_s"] = record_time_s
       csv_row["setpoint_C"] = self.desired_temperature
+      csv_row["signed_pwm"] = signed_pwm
       csv_row["current_i"] = self.ki * self.integral_error
       csv_writer.writerow(csv_row)
       csv_file.flush()  # Flush every accepted row to reduce loss on a crash.
@@ -2337,6 +2163,14 @@ class ArduinoWindow(QMainWindow):
 
     self.range_status_label.setText("Showing last 60 seconds")
 
+    self.update_plots()
+
+  def show_all_data(self):
+    """Show the complete experiment and automatically fit both plot axes."""
+    self.view_mode = "all"
+    self.view_start = None
+    self.view_end = None
+    self.range_status_label.setText("Showing all recorded data (auto-fit)")
     self.update_plots()
 
   def show_time_segment(self):
@@ -2382,6 +2216,9 @@ class ArduinoWindow(QMainWindow):
     if self.view_mode == "last60":
       left_edge = max(0, newest_time - WINDOW_SECONDS)
       right_edge = newest_time
+    elif self.view_mode == "all":
+      left_edge = min(self.times)
+      right_edge = max(self.times)
     else:
       left_edge = self.view_start
       right_edge = self.view_end
@@ -2403,13 +2240,26 @@ class ArduinoWindow(QMainWindow):
     self.desired_temperature_curve.setData(display_times, display_setpoints)
 
     if display_temperatures:
-      temp_min = min(min(values_by_key[key]) for key in keys)
-      temp_max = max(max(values_by_key[key]) for key in keys)
-      temp_range = max(temp_max - temp_min, 2)
-      self.temperature_plot.setYRange(
-        max(TEMP_MIN, temp_min - temp_range * 0.10),
-        min(TEMP_MAX, temp_max + temp_range * 0.10), padding=0
+      # Include all six sensors and the setpoint when fitting the temperature
+      # axis, so none of the plotted traces are clipped.
+      temperature_values = [
+        value
+        for key in keys
+        for value in values_by_key[key]
+        if math.isfinite(value)
+      ]
+      temperature_values.extend(
+        value for value in display_setpoints if math.isfinite(value)
       )
+      if temperature_values:
+        temp_min = min(temperature_values)
+        temp_max = max(temperature_values)
+        temp_range = max(temp_max - temp_min, 2.0)
+        self.temperature_plot.setYRange(
+          temp_min - temp_range * 0.10,
+          temp_max + temp_range * 0.10,
+          padding=0
+        )
 
     # Keep the original heat/cool split and signed PWM plot behavior.
     heat_pwm, cool_pwm = [], []
@@ -2422,16 +2272,22 @@ class ArduinoWindow(QMainWindow):
     if display_pwms:
       pwm_min, pwm_max = min(display_pwms), max(display_pwms)
       padding = max((pwm_max - pwm_min), 10) * 0.15
-      axis_min = max(-PWM_MAX, min(0, pwm_min - padding))
-      axis_max = min(PWM_MAX, max(0, pwm_max + padding))
-      if axis_max - axis_min < 10:
-        axis_min, axis_max = max(-PWM_MAX, axis_min - 5), min(PWM_MAX, axis_max + 5)
+      axis_min = min(0, pwm_min - padding)
+      axis_max = max(0, pwm_max + padding)
       self.pwm_plot.setYRange(axis_min, axis_max, padding=0)
 
+    # Give the first/last samples a little breathing room. In Fit All mode,
+    # this range expands as new records arrive so the entire run stays visible.
     if right_edge <= left_edge:
-      right_edge = left_edge + 1
-    self.temperature_plot.setXRange(left_edge, right_edge, padding=0)
-    self.pwm_plot.setXRange(left_edge, right_edge, padding=0)
+      time_padding = 0.5
+    else:
+      time_padding = max((right_edge - left_edge) * 0.02, 0.5)
+    self.temperature_plot.setXRange(
+      left_edge - time_padding, right_edge + time_padding, padding=0
+    )
+    self.pwm_plot.setXRange(
+      left_edge - time_padding, right_edge + time_padding, padding=0
+    )
 
   # ========================================================
 
